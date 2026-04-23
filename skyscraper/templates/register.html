@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Register - AMG Skyscraper</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #222222 0%, #1a1a1a 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .register-container {
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            overflow: hidden;
+            max-width: 900px;
+            width: 100%;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+        }
+
+        .register-left {
+            background: linear-gradient(135deg, #C41E3A 0%, #8B0000 100%);
+            color: white;
+            padding: 60px 40px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            text-align: center;
+        }
+
+        .register-left h1 {
+            font-size: 2.5em;
+            margin-bottom: 15px;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            font-weight: 900;
+        }
+
+        .amg-symbol {
+            font-size: 1.2em;
+            margin-bottom: 20px;
+            opacity: 0.9;
+        }
+
+        .register-left p {
+            font-size: 1.1em;
+            opacity: 0.95;
+            line-height: 1.6;
+            margin-bottom: 30px;
+        }
+
+        .register-right {
+            padding: 60px 40px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+
+        .register-form h2 {
+            color: #222222;
+            margin-bottom: 10px;
+            font-size: 1.8em;
+        }
+
+        .register-form p {
+            color: #999;
+            margin-bottom: 30px;
+            font-size: 0.95em;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            color: #333;
+            font-weight: 600;
+            margin-bottom: 8px;
+            font-size: 0.9em;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 12px 15px;
+            border: 2px solid #E8E8E8;
+            border-radius: 5px;
+            font-size: 1em;
+            transition: all 0.3s ease;
+            font-family: inherit;
+        }
+
+        .form-group input:focus {
+            outline: none;
+            border-color: #C41E3A;
+            box-shadow: 0 0 0 3px rgba(196, 30, 58, 0.1);
+        }
+
+        .form-group input::placeholder {
+            color: #ccc;
+        }
+
+        .password-requirements {
+            font-size: 0.85em;
+            color: #666;
+            margin-top: 8px;
+            padding: 10px;
+            background: #f5f5f5;
+            border-radius: 4px;
+            line-height: 1.5;
+        }
+
+        .requirement {
+            display: flex;
+            align-items: center;
+            margin-bottom: 5px;
+        }
+
+        .requirement::before {
+            content: '○';
+            margin-right: 8px;
+            color: #999;
+        }
+
+        .requirement.valid::before {
+            content: '✓';
+            color: #00C853;
+            font-weight: bold;
+        }
+
+        .btn-register {
+            background: linear-gradient(135deg, #C41E3A 0%, #8B0000 100%);
+            color: white;
+            padding: 14px;
+            border: none;
+            border-radius: 5px;
+            font-size: 1em;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 5px 15px rgba(196, 30, 58, 0.3);
+            margin-top: 10px;
+        }
+
+        .btn-register:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(196, 30, 58, 0.4);
+        }
+
+        .btn-register:active {
+            transform: translateY(0);
+        }
+
+        .signin-link {
+            text-align: center;
+            margin-top: 25px;
+            padding-top: 25px;
+            border-top: 1px solid #E8E8E8;
+            color: #666;
+            font-size: 0.9em;
+        }
+
+        .signin-link a {
+            color: #C41E3A;
+            text-decoration: none;
+            font-weight: 700;
+        }
+
+        .signin-link a:hover {
+            text-decoration: underline;
+        }
+
+        .alerts {
+            margin-bottom: 20px;
+        }
+
+        .alert {
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 10px;
+            font-size: 0.9em;
+        }
+
+        .alert-danger {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+
+        .alert-warning {
+            background: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeaa7;
+        }
+
+        .alert-success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        @media (max-width: 768px) {
+            .register-container {
+                grid-template-columns: 1fr;
+            }
+
+            .register-left {
+                padding: 40px 30px;
+                display: none;
+            }
+
+            .register-right {
+                padding: 40px 30px;
+            }
+
+            .register-form h2 {
+                font-size: 1.5em;
+            }
+        }
+
+        .btn-register:disabled {
+            opacity: 0.7;
+            cursor: not-allowed;
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 15px;
+            height: 15px;
+            border: 3px solid rgba(255, 255, 255, 0.3);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 10px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="register-container">
+        <!-- Left Side - Branding -->
+        <div class="register-left">
+            <div class="amg-symbol">⚡ AMG</div>
+            <h1>Skyscraper</h1>
+            <p>Professional Data Collection Platform</p>
+            <p style="margin-top: 40px; font-size: 0.95em; opacity: 0.9;">
+                Join thousands of data professionals using AMG Skyscraper to collect and analyze market data.
+            </p>
+        </div>
+
+        <!-- Right Side - Registration Form -->
+        <div class="register-right">
+            <div class="register-form">
+                <h2>Create Account</h2>
+                <p>Sign up to get started with AMG Skyscraper</p>
+
+                <!-- Alerts -->
+                <div class="alerts">
+                    {% with messages = get_flashed_messages(with_categories=true) %}
+                        {% if messages %}
+                            {% for category, message in messages %}
+                                <div class="alert alert-{{ category }}">{{ message }}</div>
+                            {% endfor %}
+                        {% endif %}
+                    {% endwith %}
+                </div>
+
+                <!-- Registration Form -->
+                <form method="POST" action="{{ url_for('register') }}" id="registerForm">
+                    <div class="form-group">
+                        <label for="username">Username</label>
+                        <input
+                            type="text"
+                            id="username"
+                            name="username"
+                            placeholder="Choose a username"
+                            required
+                            minlength="3"
+                            maxlength="80"
+                            pattern="[a-zA-Z0-9_-]+"
+                            title="Username can contain letters, numbers, - and _"
+                        >
+                        <small style="color: #999;">3-80 characters, letters/numbers/- /_</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="email">Email Address</label>
+                        <input
+                            type="email"
+                            id="email"
+                            name="email"
+                            placeholder="your@email.com"
+                            required
+                        >
+                    </div>
+
+                    <div class="form-group">
+                        <label for="password">Password</label>
+                        <input
+                            type="password"
+                            id="password"
+                            name="password"
+                            placeholder="Create a strong password"
+                            required
+                            minlength="6"
+                        >
+                        <div class="password-requirements">
+                            <div class="requirement" id="req-length">At least 6 characters</div>
+                            <div class="requirement" id="req-upper">At least one uppercase letter</div>
+                            <div class="requirement" id="req-lower">At least one lowercase letter</div>
+                            <div class="requirement" id="req-number">At least one number</div>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="password_confirm">Confirm Password</label>
+                        <input
+                            type="password"
+                            id="password_confirm"
+                            name="password_confirm"
+                            placeholder="Re-enter your password"
+                            required
+                        >
+                    </div>
+
+                    <div style="display: flex; align-items: center; margin-bottom: 20px; font-size: 0.9em;">
+                        <input type="checkbox" id="agree" name="agree" required style="margin-right: 10px;">
+                        <label for="agree" style="margin: 0;">
+                            I agree to the Terms of Service and Privacy Policy
+                        </label>
+                    </div>
+
+                    <button type="submit" class="btn-register" id="registerBtn">
+                        Create Account
+                    </button>
+                </form>
+
+                <div class="signin-link">
+                    Already have an account? <a href="{{ url_for('login') }}">Sign in</a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const passwordInput = document.getElementById('password');
+        const confirmInput = document.getElementById('password_confirm');
+        const form = document.getElementById('registerForm');
+
+        // Check password requirements
+        passwordInput.addEventListener('input', function() {
+            const password = this.value;
+
+            // Check length
+            document.getElementById('req-length').classList.toggle('valid', password.length >= 6);
+
+            // Check uppercase
+            document.getElementById('req-upper').classList.toggle('valid', /[A-Z]/.test(password));
+
+            // Check lowercase
+            document.getElementById('req-lower').classList.toggle('valid', /[a-z]/.test(password));
+
+            // Check number
+            document.getElementById('req-number').classList.toggle('valid', /[0-9]/.test(password));
+        });
+
+        // Validate password match
+        form.addEventListener('submit', function(e) {
+            if (passwordInput.value !== confirmInput.value) {
+                e.preventDefault();
+                alert('Passwords do not match!');
+                confirmInput.focus();
+                return;
+            }
+
+            const btn = document.getElementById('registerBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner"></span>Creating account...';
+        });
+    </script>
+</body>
+</html>

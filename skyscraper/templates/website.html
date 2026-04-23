@@ -1,0 +1,361 @@
+{% extends "base.html" %}
+
+{% block title %}{{ website.name }} - Website Management{% endblock %}
+
+{% block content %}
+<div class="website-detail">
+    <div class="back-button" style="margin-bottom: 20px;">
+        <a href="/" class="btn btn-secondary btn-small">← Back to Dashboard</a>
+    </div>
+
+    <div class="website-info-section">
+        <h2>{{ website.name }}</h2>
+        <p class="description-text">{{ website.description }}</p>
+
+        <div class="info-grid">
+            <div class="info-item">
+                <span class="info-label">Website Type:</span>
+                <span class="info-value">
+                    {% if website.type == 'cars' %}
+                    🚗 Car Listings
+                    {% elif website.type == 'realestate' %}
+                    🏠 Real Estate
+                    {% else %}
+                    {{ website.type }}
+                    {% endif %}
+                </span>
+            </div>
+
+            <div class="info-item">
+                <span class="info-label">Status:</span>
+                <span class="info-value">
+                    {% if website.enabled %}
+                    <span class="status-badge status-enabled">ENABLED</span>
+                    {% else %}
+                    <span class="status-badge status-disabled">DISABLED</span>
+                    {% endif %}
+                </span>
+            </div>
+
+            <div class="info-item">
+                <span class="info-label">Total Items:</span>
+                <span class="info-value">{{ website.total_items or 0 }}</span>
+            </div>
+
+            <div class="info-item">
+                <span class="info-label">URL:</span>
+                <span class="info-value"><a href="{{ website.url }}" target="_blank">{{ website.url }}</a></span>
+            </div>
+
+            {% if website.last_run %}
+            <div class="info-item">
+                <span class="info-label">Last Run:</span>
+                <span class="info-value">{{ website.last_run }}</span>
+            </div>
+
+            <div class="info-item">
+                <span class="info-label">Last Run Count:</span>
+                <span class="info-value">{{ website.last_run_count or 0 }} items</span>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Scraper Control Section -->
+    <div class="control-section" style="margin-top: 40px;">
+        <h3>⚙️ Scraper Control</h3>
+
+        <div class="control-buttons" style="margin-bottom: 30px;">
+            <button class="btn btn-success" onclick="runScraper()">
+                ▶️ Run Scraper Now
+            </button>
+            <button class="btn btn-primary btn-small" onclick="toggleWebsite()">
+                {% if website.enabled %}
+                🔒 Disable Website
+                {% else %}
+                🔓 Enable Website
+                {% endif %}
+            </button>
+        </div>
+
+        <div id="scraper-output" style="display: none;">
+            <div class="output-box">
+                <h4>Scraper Output</h4>
+                <div id="output-content" style="font-family: monospace; font-size: 0.9em; max-height: 300px; overflow-y: auto; background: #f5f5f5; padding: 15px; border-radius: 5px;"></div>
+            </div>
+        </div>
+
+        <div id="scraper-result" style="margin-top: 20px;"></div>
+    </div>
+
+    <!-- Settings Section -->
+    <div class="settings-section" style="margin-top: 40px;">
+        <h3>⚙️ Settings</h3>
+
+        <div class="setting-item">
+            <label for="sheet-id-input">
+                <strong>Google Sheet ID:</strong>
+                <small style="display: block; color: #666; margin-top: 5px;">The ID of the Google Sheet where data will be saved</small>
+            </label>
+            <input type="text" id="sheet-id-input" value="{{ website.google_sheet_id }}" style="width: 100%; padding: 10px; margin-top: 10px; border: 1px solid #ddd; border-radius: 5px; font-family: monospace;">
+            <button class="btn btn-primary btn-small" onclick="updateSheetId()" style="margin-top: 10px;">
+                💾 Update Sheet ID
+            </button>
+            <div id="sheet-update-result" style="margin-top: 10px;"></div>
+        </div>
+    </div>
+
+    <!-- Statistics Preview -->
+    <div class="stats-preview-section" style="margin-top: 40px;">
+        <h3>📊 Statistics Preview</h3>
+        <button class="btn btn-primary" onclick="loadStatistics()">
+            📈 Load Statistics
+        </button>
+        <div id="statistics-container" style="margin-top: 20px;"></div>
+    </div>
+</div>
+
+<style>
+    .website-detail {
+        animation: fadeIn 0.5s ease-in;
+    }
+
+    @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(10px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+
+    .website-info-section h2 {
+        color: #667eea;
+        font-size: 2em;
+        margin-bottom: 10px;
+    }
+
+    .description-text {
+        color: #666;
+        font-size: 1.1em;
+        margin-bottom: 20px;
+    }
+
+    .info-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+        gap: 20px;
+        background: #f8f9fa;
+        padding: 20px;
+        border-radius: 8px;
+        margin-bottom: 20px;
+    }
+
+    .info-item {
+        display: flex;
+        flex-direction: column;
+    }
+
+    .info-label {
+        color: #666;
+        font-weight: bold;
+        margin-bottom: 5px;
+        font-size: 0.9em;
+    }
+
+    .info-value {
+        color: #333;
+        font-size: 1.1em;
+    }
+
+    .info-value a {
+        color: #667eea;
+        text-decoration: none;
+    }
+
+    .info-value a:hover {
+        text-decoration: underline;
+    }
+
+    .control-section,
+    .settings-section,
+    .stats-preview-section {
+        background: white;
+        padding: 20px;
+        border: 1px solid #dee2e6;
+        border-radius: 8px;
+    }
+
+    .control-section h3,
+    .settings-section h3,
+    .stats-preview-section h3 {
+        color: #667eea;
+        margin-bottom: 20px;
+    }
+
+    .control-buttons {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+    }
+
+    .output-box {
+        background: white;
+        border: 1px solid #dee2e6;
+        border-radius: 8px;
+        padding: 15px;
+    }
+
+    .output-box h4 {
+        margin: 0 0 15px 0;
+        color: #667eea;
+    }
+
+    .setting-item {
+        background: #f8f9fa;
+        padding: 15px;
+        border-radius: 8px;
+        margin-bottom: 15px;
+    }
+
+    .setting-item label {
+        display: block;
+    }
+
+    @media (max-width: 768px) {
+        .info-grid {
+            grid-template-columns: 1fr;
+        }
+
+        .control-buttons {
+            flex-direction: column;
+        }
+
+        .control-buttons .btn {
+            width: 100%;
+        }
+    }
+</style>
+
+<script>
+    function runScraper() {
+        const websiteId = '{{ website.id }}';
+        const resultDiv = document.getElementById('scraper-result');
+        const outputDiv = document.getElementById('scraper-output');
+        const outputContent = document.getElementById('output-content');
+
+        resultDiv.innerHTML = '';
+        outputDiv.style.display = 'block';
+        outputContent.innerHTML = '<span class="spinner"></span> Running scraper for {{ website.name }}...';
+
+        fetch('/api/run-scraper', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ website_id: websiteId })
+        })
+        .then(response => response.json())
+        .then(data => {
+            let output = '';
+            if (data.status === 'success') {
+                output = `
+                    <strong>✅ Scraping Completed Successfully</strong><br>
+                    Total Items: ${data.items_scraped}<br>
+                    Duration: ${data.duration_seconds.toFixed(1)} seconds<br>
+                    Message: ${data.message}<br><br>
+                    <strong>Statistics:</strong><br>
+                    ${JSON.stringify(data.statistics, null, 2)}
+                `;
+                resultDiv.innerHTML = `<div class="alert alert-success">Scraper completed successfully! ${data.items_scraped} items scraped.</div>`;
+            } else {
+                output = `<strong>❌ Error:</strong><br>${data.message || data.error}`;
+                resultDiv.innerHTML = `<div class="alert alert-error">Error: ${data.message || data.error}</div>`;
+            }
+            outputContent.innerHTML = output;
+        })
+        .catch(error => {
+            outputContent.innerHTML = `<strong>❌ Network Error:</strong><br>${error.message}`;
+            resultDiv.innerHTML = `<div class="alert alert-error">Error: ${error.message}</div>`;
+        });
+    }
+
+    function toggleWebsite() {
+        const websiteId = '{{ website.id }}';
+        const isCurrentlyEnabled = {{ 'true' if website.enabled else 'false' }};
+
+        fetch('/api/enable-website', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                website_id: websiteId,
+                enabled: !isCurrentlyEnabled
+            })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.status === 'success') {
+                alert(data.message);
+                location.reload();
+            } else {
+                alert('Error: ' + data.error);
+            }
+        })
+        .catch(error => {
+            alert('Error: ' + error.message);
+        });
+    }
+
+    function updateSheetId() {
+        const websiteId = '{{ website.id }}';
+        const sheetId = document.getElementById('sheet-id-input').value.trim();
+
+        if (!sheetId) {
+            alert('Please enter a Google Sheet ID');
+            return;
+        }
+
+        const resultDiv = document.getElementById('sheet-update-result');
+        resultDiv.innerHTML = '<span class="spinner"></span> Updating...';
+
+        fetch('/api/update-sheet-id', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                website_id: websiteId,
+                sheet_id: sheetId
+            })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.status === 'success') {
+                resultDiv.innerHTML = `<div class="alert alert-success">${data.message}</div>`;
+            } else {
+                resultDiv.innerHTML = `<div class="alert alert-error">Error: ${data.error}</div>`;
+            }
+        })
+        .catch(error => {
+            resultDiv.innerHTML = `<div class="alert alert-error">Error: ${error.message}</div>`;
+        });
+    }
+
+    function loadStatistics() {
+        const websiteId = '{{ website.id }}';
+        const statsContainer = document.getElementById('statistics-container');
+
+        statsContainer.innerHTML = '<span class="spinner"></span> Loading statistics...';
+
+        fetch(`/api/statistics/${websiteId}`)
+        .then(response => response.json())
+        .then(data => {
+            let statsHtml = '<div style="background: #f8f9fa; padding: 15px; border-radius: 8px;"><pre>';
+            statsHtml += JSON.stringify(data, null, 2);
+            statsHtml += '</pre></div>';
+            statsContainer.innerHTML = statsHtml;
+        })
+        .catch(error => {
+            statsContainer.innerHTML = `<div class="alert alert-error">Error loading statistics: ${error.message}</div>`;
+        });
+    }
+</script>
+{% endblock %}

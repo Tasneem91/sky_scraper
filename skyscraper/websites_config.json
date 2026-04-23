@@ -1,0 +1,164 @@
+{
+  "app_name": "Multi-Website Scraper Platform",
+  "version": "2.0",
+  "description": "Unified scraper for multiple websites (cars and real estate)",
+  "websites": [
+    {
+      "id": "syriacar",
+      "name": "SyriaCar",
+      "description": "Car listings in Syria",
+      "url": "https://syriacar.net",
+      "type": "cars",
+      "scraper_class": "SyriaCarScraper",
+      "scraper_file": "scrapers/syriacar_scraper.py",
+      "google_sheet_id": "1Oyhm4mrg7zz1pf3I-1_nhddTJsuscN8ppEn-Nr3UCFI",
+      "enabled": true,
+      "priority": 1,
+      "image_folder": "images/syriacar",
+      "scheduling": {
+        "enabled": true,
+        "frequency": "weekly",
+        "day": "Monday",
+        "time": "09:00"
+      },
+      "last_run": "2026-04-23T13:25:12.096263",
+      "total_items": 1020,
+      "last_run_count": 1020
+    },
+    {
+      "id": "damazzle",
+      "name": "Damazzle Motors",
+      "description": "Car listings from damazzle.com/motors",
+      "url": "https://damazzle.com/motors/cars/search",
+      "type": "cars",
+      "scraper_class": "DamazzleScraper",
+      "scraper_file": "scrapers/damazzle_scraper.py",
+      "google_sheet_id": "1iwiUod_ik-9NE4G6xXPe7Lffd3mt5QAHh_G8BIC8RJU",
+      "enabled": true,
+      "priority": 2,
+      "image_folder": "images/damazzle",
+      "scheduling": {
+        "enabled": false,
+        "frequency": "weekly",
+        "day": "Tuesday",
+        "time": "10:00"
+      },
+      "last_run": "2026-04-23T13:29:00.902845",
+      "total_items": 64,
+      "last_run_count": 64
+    },
+    {
+      "id": "website3",
+      "name": "Website 3 - Real Estate",
+      "description": "Real estate properties",
+      "url": "https://example-realestate.com",
+      "type": "realestate",
+      "scraper_class": "Website3RealEstateScraper",
+      "scraper_file": "scrapers/website3_scraper.py",
+      "google_sheet_id": "YOUR-SHEET-ID-HERE",
+      "enabled": false,
+      "priority": 3,
+      "image_folder": "images/website3",
+      "scheduling": {
+        "enabled": false,
+        "frequency": "weekly",
+        "day": "Wednesday",
+        "time": "11:00"
+      },
+      "last_run": null,
+      "total_items": 0,
+      "last_run_count": 0
+    },
+    {
+      "id": "website4",
+      "name": "Website 4",
+      "description": "To be configured",
+      "url": "https://example4.com",
+      "type": "cars",
+      "scraper_class": "Website4Scraper",
+      "scraper_file": "scrapers/website4_scraper.py",
+      "google_sheet_id": "YOUR-SHEET-ID-HERE",
+      "enabled": false,
+      "priority": 4,
+      "image_folder": "images/website4",
+      "scheduling": {
+        "enabled": false
+      },
+      "last_run": null,
+      "total_items": 0,
+      "last_run_count": 0
+    },
+    {
+      "id": "website5",
+      "name": "Website 5",
+      "description": "To be configured",
+      "url": "https://example5.com",
+      "type": "cars",
+      "scraper_class": "Website5Scraper",
+      "scraper_file": "scrapers/website5_scraper.py",
+      "google_sheet_id": "YOUR-SHEET-ID-HERE",
+      "enabled": false,
+      "priority": 5,
+      "image_folder": "images/website5",
+      "scheduling": {
+        "enabled": false
+      },
+      "last_run": null,
+      "total_items": 0,
+      "last_run_count": 0
+    },
+    {
+      "id": "website6",
+      "name": "Website 6",
+      "description": "To be configured",
+      "url": "https://example6.com",
+      "type": "realestate",
+      "scraper_class": "Website6Scraper",
+      "scraper_file": "scrapers/website6_scraper.py",
+      "google_sheet_id": "YOUR-SHEET-ID-HERE",
+      "enabled": false,
+      "priority": 6,
+      "image_folder": "images/website6",
+      "scheduling": {
+        "enabled": false
+      },
+      "last_run": null,
+      "total_items": 0,
+      "last_run_count": 0
+    },
+    {
+      "id": "website7",
+      "name": "Website 7",
+      "description": "To be configured",
+      "url": "https://example7.com",
+      "type": "realestate",
+      "scraper_class": "Website7Scraper",
+      "scraper_file": "scrapers/website7_scraper.py",
+      "google_sheet_id": "YOUR-SHEET-ID-HERE",
+      "enabled": false,
+      "priority": 7,
+      "image_folder": "images/website7",
+      "scheduling": {
+        "enabled": false
+      },
+      "last_run": null,
+      "total_items": 0,
+      "last_run_count": 0
+    }
+  ],
+  "database": {
+    "type": "sqlite",
+    "path": "D:\\skyscraper\\scraper.db"
+  },
+  "logging": {
+    "level": "INFO",
+    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    "log_dir": "logs"
+  },
+  "google_sheets": {
+    "credentials_file": "credentials.json",
+    "scopes": [
+      "https://www.googleapis.com/auth/spreadsheets"
+    ]
+  }
+}

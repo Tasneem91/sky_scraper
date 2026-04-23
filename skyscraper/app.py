@@ -336,6 +336,7 @@ def api_run_scraper():
     """Execute scraper for a website"""
     data = request.get_json()
     website_id = data.get('website_id')
+    listing_type = data.get('listing_type', 'sell')  # NEW: For Damazzle SELL/RENT
 
     config = load_config()
     website = next((w for w in config['websites'] if w['id'] == website_id), None)
@@ -347,10 +348,18 @@ def api_run_scraper():
         return jsonify({'error': 'Website is disabled'}), 400
 
     try:
-        logger.info(f"Starting scraper for {website_id} by user {current_user.username}")
+        logger.info(f"Starting scraper for {website_id} (listing_type: {listing_type}) by user {current_user.username}")
 
-        # Get scraper instance
-        scraper = get_scraper_instance(website)
+        # Get scraper instance (NEW: Handle Damazzle with listing_type)
+        if 'damazzle' in website_id.lower():
+            try:
+                from scrapers.damazzle_scraper import DamazzleScraper
+                scraper = DamazzleScraper(website, listing_type=listing_type)
+            except ImportError:
+                scraper = get_scraper_instance(website)
+        else:
+            scraper = get_scraper_instance(website)
+
         if not scraper:
             return jsonify({'error': 'Could not initialize scraper'}), 500
 
@@ -385,6 +394,7 @@ def api_run_scraper():
         return jsonify({
             'status': 'success',
             'website_id': website_id,
+            'listing_type': listing_type,  # NEW: Return selected type
             'items_scraped': len(items),
             'duration_seconds': duration,
             'statistics': stats,

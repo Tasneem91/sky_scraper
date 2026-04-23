@@ -115,7 +115,7 @@
         <label for="website-selector" style="display: block; margin: 15px 0;">
             <strong>Select Website:</strong>
         </label>
-        <select id="website-selector" style="padding: 10px; font-size: 1em; width: 300px; max-width: 100%;">
+        <select id="website-selector" onchange="onWebsiteSelect()" style="padding: 10px; font-size: 1em; width: 300px; max-width: 100%;">
             <option value="">-- Select a website --</option>
             {% for website in cars_websites %}
             <option value="{{ website.id }}">{{ website.name }} (Cars)</option>
@@ -124,6 +124,19 @@
             <option value="{{ website.id }}">{{ website.name }} (Real Estate)</option>
             {% endfor %}
         </select>
+
+        <!-- NEW: Damazzle SELL/RENT Buttons -->
+        <div id="damazzle-controls" style="display: none; margin-top: 15px; padding: 15px; background: white; border: 2px solid #C41E3A; border-radius: 5px;">
+            <p style="margin: 0 0 10px 0; font-weight: bold;">🚗 Choose Damazzle Type:</p>
+            <button id="btn-sell" class="btn btn-primary" onclick="selectDamazzleType('sell')" style="margin-right: 10px;">
+                📋 Scrape SELL Cars
+            </button>
+            <button id="btn-rent" class="btn" onclick="selectDamazzleType('rent')" style="background: #666; margin-right: 10px;">
+                🔄 Scrape RENT Cars
+            </button>
+            <span id="selected-type" style="font-size: 0.9em; color: #C41E3A;">Selected: SELL</span>
+        </div>
+
         <button class="btn btn-primary" onclick="runScraperQuick()" style="margin-top: 10px;">
             ▶️ Run Scraper
         </button>
@@ -247,12 +260,48 @@
 </style>
 
 <script>
+    // NEW: Global variable for Damazzle type
+    let damazzleType = 'sell';
+
     function goToWebsite(websiteId) {
         window.location.href = `/website/${websiteId}`;
     }
 
     function viewStats(websiteId) {
         window.location.href = `/statistics/${websiteId}`;
+    }
+
+    // NEW: Handle website selection
+    function onWebsiteSelect() {
+        const websiteId = document.getElementById('website-selector').value;
+        const damazzleControls = document.getElementById('damazzle-controls');
+
+        if (websiteId.includes('damazzle')) {
+            damazzleControls.style.display = 'block';
+        } else {
+            damazzleControls.style.display = 'none';
+        }
+    }
+
+    // NEW: Select Damazzle type
+    function selectDamazzleType(type) {
+        damazzleType = type;
+
+        const btnSell = document.getElementById('btn-sell');
+        const btnRent = document.getElementById('btn-rent');
+        const selectedSpan = document.getElementById('selected-type');
+
+        if (type === 'sell') {
+            btnSell.className = 'btn btn-primary';
+            btnRent.className = 'btn';
+            btnRent.style.background = '#666';
+            selectedSpan.textContent = 'Selected: SELL (📋 Cars for Sale)';
+        } else {
+            btnSell.className = 'btn';
+            btnSell.style.background = '#666';
+            btnRent.className = 'btn btn-primary';
+            selectedSpan.textContent = 'Selected: RENT (🔄 Cars for Rent)';
+        }
     }
 
     function runScraperQuick() {
@@ -266,20 +315,32 @@
         const resultDiv = document.getElementById('scraper-result');
         resultDiv.innerHTML = '<div class="alert alert-info"><span class="spinner"></span> Running scraper for ' + websiteId + '...</div>';
 
+        // NEW: Include listing_type for Damazzle
+        const body = { website_id: websiteId };
+        if (websiteId.includes('damazzle')) {
+            body.listing_type = damazzleType;
+        }
+
         fetch('/api/run-scraper', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
             },
-            body: JSON.stringify({ website_id: websiteId })
+            body: JSON.stringify(body)
         })
         .then(response => response.json())
         .then(data => {
             if (data.status === 'success') {
+                // NEW: Show listing type for Damazzle
+                let typeInfo = '';
+                if (data.listing_type) {
+                    typeInfo = `<br><small>Type: ${data.listing_type.toUpperCase()}</small>`;
+                }
+
                 resultDiv.innerHTML = `
                     <div class="alert alert-success">
                         <strong>Success!</strong><br>
-                        Scraped ${data.items_scraped} items in ${data.duration_seconds.toFixed(1)} seconds<br>
+                        Scraped ${data.items_scraped} items in ${data.duration_seconds.toFixed(1)} seconds${typeInfo}<br>
                         <small>${data.message}</small>
                     </div>
                 `;

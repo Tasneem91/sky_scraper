@@ -101,11 +101,11 @@ class BaseScraper(ABC):
 
         stats = {}
 
-        # Most common makes
+        # Most common brands
         makes = {}
         for item in items:
-            make = item.get('make', 'N/A')
-            if make != 'N/A':
+            make = item.get('brand') or item.get('make')
+            if make:
                 makes[make] = makes.get(make, 0) + 1
 
         if makes:
@@ -283,7 +283,7 @@ class CarsScraper(BaseScraper):
         # Most common combinations
         brand_models = {}
         for item in items:
-            make = item.get('make', 'Unknown')
+            make = item.get('brand') or item.get('make') or 'Unknown'
             model = item.get('model', 'Unknown')
             key = f"{make} {model}"
             brand_models[key] = brand_models.get(key, 0) + 1

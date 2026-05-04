@@ -102,6 +102,9 @@ def get_scraper_instance(website_config):
 
         # Import module dynamically
         module_name = scraper_file.replace('/', '.').replace('.py', '')
+        # Force reload: always read latest file from disk (avoid sys.modules cache)
+        if module_name in sys.modules:
+            del sys.modules[module_name]
         try:
             module = importlib.import_module(module_name)
         except ImportError as e:

@@ -13,6 +13,7 @@ from typing import List, Dict, Any
 
 from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
+from scrapers import parser as car_parser
 
 logger = logging.getLogger(__name__)
 
@@ -156,168 +157,88 @@ class KilometrageScraper:
         return self.items
 
     def _extract_listing(self, listing_div) -> Dict[str, Any]:
-        """
-        Extract a single car listing from HTML
-        Returns all 25 columns from unified schema
-
-        Args:
-            listing_div: BeautifulSoup div containing the listing
-
-        Returns:
-            Dictionary with extracted car data (unified schema)
-        """
+        """Stage 1 (raw) + Stage 2 (parse) for a single Kilometrage card."""
         try:
-            # Initialize with all 25 unified schema fields
-            item = {
-                'scraped_at': datetime.now().isoformat(),
-                'source': 'kilometrage',
-                'id': None,
-                'title': None,
-                'price': None,
-                'price_raw': None,
-                'brand': None,
-                'model': None,
-                'category': None,
-                'year': None,
-                'mileage': None,
-                'location': None,
-                'posted_date': None,
-                'condition': None,  # Not available for Kilometrage
-                'fuel_type': None,
-                'transmission': None,
-                'body_type': None,  # Not available for Kilometrage
-                'origin': None,  # Not available for Kilometrage
-                'image_count': 0,
-                'images': '[]',
-                'primary_image': None,
-                'link': None,
-                'ad_id': None,
-                'ad_url': None,
-                'description': None,  # Not available for Kilometrage
-                'listing_type': 'sell',
-            }
-
-            # Extract brand from h5
-            brand_elem = listing_div.find('h5')
-            if brand_elem:
-                item['brand'] = brand_elem.get_text(strip=True)
-
-            # Extract model from h6 (contains multiple spans)
-            model_elem = listing_div.find('h6')
-            if model_elem:
-                model_spans = model_elem.find_all('span')
-                if model_spans:
-                    model_parts = []
-                    for span in model_spans:
-                        text = span.get_text(strip=True)
-                        if text:
-                            model_parts.append(text)
-                    if model_parts:
-                        item['model'] = ' '.join(model_parts)
-
-            # Extract category from h6 with text-primary class (if exists)
-            category_elems = listing_div.find_all('h6', class_='text-primary')
-            if category_elems:
-                item['category'] = category_elems[0].get_text(strip=True)
-
-            # Extract price from text-success span
-            price_elem = listing_div.find('span', class_='text-success')
-            if price_elem:
-                price_text = price_elem.get_text(strip=True)
-                item['price_raw'] = price_text
-                item['price'] = self._clean_price(price_text)
-
-            # Extract location, mileage, year, transmission, fuel from col-6 divs
-            col_divs = listing_div.find_all('div', class_='col-6')
-
-            if len(col_divs) >= 2:
-                # First col-6 contains: location, mileage, year
-                first_col = col_divs[0]
-                col_12s_first = first_col.find_all('div', class_='col-12')
-
-                if len(col_12s_first) >= 1:
-                    # Location (first col-12)
-                    location_text = col_12s_first[0].get_text(strip=True)
-                    if location_text:
-                        item['location'] = location_text
-
-                if len(col_12s_first) >= 2:
-                    # Mileage (second col-12)
-                    mileage_text = col_12s_first[1].get_text(strip=True)
-                    if mileage_text:
-                        item['mileage'] = mileage_text
-
-                if len(col_12s_first) >= 3:
-                    # Year (third col-12)
-                    year_text = col_12s_first[2].get_text(strip=True)
-                    if year_text:
-                        year_match = re.search(r'\d{4}', year_text)
-                        if year_match:
-                            item['year'] = int(year_match.group(0))
-
-                # Second col-6 contains: transmission, fuel, views
-                second_col = col_divs[1]
-                col_12s_second = second_col.find_all('div', class_='col-12')
-
-                if len(col_12s_second) >= 1:
-                    # Transmission (first col-12)
-                    transmission_text = col_12s_second[0].get_text(strip=True)
-                    if transmission_text:
-                        item['transmission'] = transmission_text
-
-                if len(col_12s_second) >= 2:
-                    # Fuel (second col-12)
-                    fuel_text = col_12s_second[1].get_text(strip=True)
-                    if fuel_text:
-                        item['fuel_type'] = fuel_text
-
-            # Extract image
-            img_elem = listing_div.find('img', class_='card-img-top')
-            if img_elem and img_elem.get('src'):
-                primary_image = img_elem.get('src')
-                item['primary_image'] = primary_image
-                item['images'] = f'["{primary_image}"]'
-                item['image_count'] = 1
-
-            # Extract link from parent anchor tag
-            parent_link = listing_div.find_parent('a')
-            if parent_link and parent_link.get('href'):
-                link = parent_link.get('href')
-                item['link'] = link
-                item['ad_url'] = link
-                # Create a unique ID
-                item['id'] = f"kilometrage_{len(self.items)}_{int(datetime.now().timestamp())}"
-
-            # Create title from brand and model
-            if item['brand'] and item['model']:
-                item['title'] = f"{item['brand']} {item['model']}"
-            elif item['brand']:
-                item['title'] = item['brand']
-
-            return item
-
+            raw = self._extract_raw(listing_div)
+            if not raw:
+                return None
+            return car_parser.parse(raw)
         except Exception as e:
             logger.error(f"Error extracting listing: {e}")
             return None
 
-    def _clean_price(self, price_text: str) -> float:
-        """
-        Clean and convert price string to float
+    def _extract_raw(self, listing_div) -> Dict[str, Any]:
+        """STAGE 1 — Raw extraction only. Collects labels/values as-is."""
+        raw = {
+            'source':      'kilometrage',
+            'id':          f"kilometrage_{len(self.items)}_{int(datetime.now().timestamp())}",
+            'scraped_at':  datetime.now().isoformat(),
+            'listing_type': 'sell',
+            'title_raw':       None,
+            'price_raw':       None,
+            'location_raw':    None,
+            'description_raw': None,
+            'ad_url':          None,
+            'ad_id':           None,
+            'specs_raw':       {},
+            'images':          [],
+            'phones_raw':      [],
+        }
 
-        Args:
-            price_text: Raw price text (e.g., "17,000$")
+        specs = raw['specs_raw']
 
-        Returns:
-            Float price value
-        """
-        try:
-            # Remove spaces, currency symbols, and commas
-            cleaned = re.sub(r'[^\d.]', '', price_text)
-            if cleaned:
-                return float(cleaned)
-            return None
-        except (ValueError, TypeError):
-            return None
+        # Brand from h5
+        brand_elem = listing_div.find('h5')
+        if brand_elem:
+            specs['الماركة'] = brand_elem.get_text(strip=True)
+
+        # Model from h6 spans
+        model_elem = listing_div.find('h6')
+        if model_elem:
+            parts = [s.get_text(strip=True) for s in model_elem.find_all('span') if s.get_text(strip=True)]
+            if parts:
+                specs['الموديل'] = ' '.join(parts)
+
+        # Category
+        cat_elems = listing_div.find_all('h6', class_='text-primary')
+        if cat_elems:
+            raw['title_raw'] = cat_elems[0].get_text(strip=True)
+
+        # Price
+        price_elem = listing_div.find('span', class_='text-success')
+        if price_elem:
+            raw['price_raw'] = price_elem.get_text(strip=True)
+
+        # Location / mileage / year (first col-6)
+        col_divs = listing_div.find_all('div', class_='col-6')
+        if len(col_divs) >= 1:
+            col12s = col_divs[0].find_all('div', class_='col-12')
+            if len(col12s) >= 1:
+                raw['location_raw'] = col12s[0].get_text(strip=True)
+            if len(col12s) >= 2:
+                specs['الكيلومترات'] = col12s[1].get_text(strip=True)
+            if len(col12s) >= 3:
+                specs['السنة'] = col12s[2].get_text(strip=True)
+
+        # Transmission / fuel (second col-6)
+        if len(col_divs) >= 2:
+            col12s = col_divs[1].find_all('div', class_='col-12')
+            if len(col12s) >= 1:
+                specs['ناقل الحركة'] = col12s[0].get_text(strip=True)
+            if len(col12s) >= 2:
+                specs['نوع الوقود'] = col12s[1].get_text(strip=True)
+
+        # Image
+        img = listing_div.find('img', class_='card-img-top')
+        if img and img.get('src'):
+            raw['images'] = [img['src']]
+
+        # Link
+        parent_a = listing_div.find_parent('a')
+        if parent_a and parent_a.get('href'):
+            raw['ad_url'] = parent_a['href']
+
+        return raw
 
     def get_statistics(self, items: List[Dict]) -> Dict[str, Any]:
         """

@@ -19,6 +19,7 @@ from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 
 from scrapers.base_scraper import CarsScraper
+from scrapers import parser as car_parser
 
 logger = logging.getLogger(__name__)
 
@@ -268,86 +269,113 @@ class SyriaCarScraper(CarsScraper):
 
     def _extract_car_data(self, item, index: int) -> Dict[str, Any]:
         """
-        Extract data from a single car listing item
-
-        Args:
-            item: BeautifulSoup element for the car item
-            index: Index number for generating ID
-
-        Returns:
-            Dictionary with car data
+        Stage 1 (raw) + Stage 2 (parse) for a single car card.
+        Raw extraction is dumb — just collect text as-is.
+        Interpretation is delegated to car_parser.parse().
         """
         try:
-            car_data = {
-                'id': f"{self.website_id}_{index}_{int(time.time())}",
-                'scraped_at': datetime.now().isoformat(),
-                'website': self.website_id,
-            }
-
-            # Extract link from share button data-link attribute
-            share_button = item.find('button', class_='share-button')
-            if share_button and share_button.get('data-link'):
-                car_data['link'] = share_button['data-link']
-            else:
-                # Fallback: try to find regular link
-                link_elem = item.find('a')
-                if link_elem and link_elem.get('href'):
-                    link = link_elem['href']
-                    if link.startswith('/'):
-                        link = urljoin(self.base_url, link)
-                    car_data['link'] = link
-                else:
-                    car_data['link'] = 'N/A'
-
-            # Extract ALL image URLs (not just the first one)
-            images = self._extract_all_images(item)
-            car_data['images'] = images  # List of all image URLs
-            car_data['image_count'] = len(images)
-            car_data['image_url'] = images[0] if images else 'N/A'  # Primary image for backward compatibility
-            car_data['image_alt'] = 'Car image'
-
-            # Extract card-info section
-            card_info = item.find('div', class_='card-info')
-            if card_info:
-                # Get all text for description
-                info_text = card_info.get_text(separator=' | ', strip=True)
-                car_data['description'] = info_text
-
-                # Parse pipe-delimited fields
-                parsed_fields = self._parse_car_description(info_text)
-                car_data.update(parsed_fields)
-
-                # Extract title
-                title_elem = card_info.find('h1', class_='car-title')
-                if title_elem:
-                    car_data['title'] = title_elem.get_text(strip=True)
-
-                # Extract features (mileage, location, fuel type, etc.)
-                features_div = card_info.find('div', class_='features')
-                if features_div:
-                    self._extract_features(features_div, car_data)
-
-            # Extract price from button
-            price_button = item.find('button', class_='btn-contact-p')
-            if price_button:
-                car_data['price'] = price_button.get_text(strip=True)
-
-            # Set defaults for missing fields
-            for field in ['title', 'price', 'description', 'link', 'image_url']:
-                if field not in car_data or not car_data[field]:
-                    car_data[field] = 'N/A'
-
-            # Initialize missing car fields
-            for field in ['make', 'model', 'year', 'mileage', 'location', 'fuel_type', 'transmission', 'body_type', 'condition', 'origin']:
-                if field not in car_data:
-                    car_data[field] = 'N/A'
-
-            logger.debug(f"Extracted car {index}: {car_data.get('title')} - {car_data.get('price')}")
-            return car_data
-
+            raw = self._extract_raw(item, index)
+            if not raw:
+                return None
+            return car_parser.parse(raw)
         except Exception as e:
             logger.error(f"Error extracting car data: {e}", exc_info=True)
             return None
+
+    def _extract_raw(self, item, index: int) -> Dict[str, Any]:
+        """
+        STAGE 1 — Raw extraction only. No interpretation.
+        Collects exactly what is on the card — labels and values as-is.
+        """
+        raw = {
+            'source':      self.website_id,
+            'id':          f"{self.website_id}_{index}_{int(time.time())}",
+            'scraped_at':  datetime.now().isoformat(),
+            'listing_type': 'sell',
+            'title_raw':       None,
+            'price_raw':       None,
+            'location_raw':    None,
+            'description_raw': None,
+            'ad_url':          None,
+            'ad_id':           None,
+            'specs_raw':       {},
+            'images':          [],
+            'phones_raw':      [],
+            'seller_raw':      None,
+        }
+
+        # Link
+        share_button = item.find('button', class_='share-button')
+        if share_button and share_button.get('data-link'):
+            raw['ad_url'] = share_button['data-link']
+        else:
+            link_elem = item.find('a')
+            if link_elem and link_elem.get('href'):
+                href = link_elem['href']
+                raw['ad_url'] = urljoin(self.base_url, href) if href.startswith('/') else href
+
+        # Images
+        raw['images'] = self._extract_all_images(item)
+
+        # card-info section
+        card_info = item.find('div', class_='card-info')
+        if card_info:
+            # Full card text → description_raw
+            raw['description_raw'] = card_info.get_text(separator=' ', strip=True)
+
+            # Title: h1.car-title = brand name (e.g. "كيا Kia")
+            title_elem = card_info.find('h1', class_='car-title')
+            if title_elem:
+                raw['title_raw'] = title_elem.get_text(strip=True)
+
+            # Subtitle: "Sportage • إس يو في • 2017" → model, body_type, year
+            subtitle_elem = card_info.find('h2', class_='car-sub-title')
+            if subtitle_elem:
+                parts = [p.strip() for p in subtitle_elem.get_text().split('•')]
+                parts = [p for p in parts if p]
+                specs = raw['specs_raw']
+                if len(parts) >= 1:
+                    specs['الموديل'] = parts[0]   # model name
+                if len(parts) >= 2:
+                    specs['نوع الهيكل'] = parts[1]  # body type
+                if len(parts) >= 3:
+                    specs['السنة'] = parts[2]       # year
+
+            # Features divs: mileage, location, fuel, origin, transmission, condition
+            features_div = card_info.find('div', class_='features')
+            if features_div:
+                specs = raw['specs_raw']
+
+                fa = features_div.find('div', class_='features-a')
+                if fa:
+                    divs = fa.find_all('div')
+                    if len(divs) >= 1:
+                        specs['الكيلومترات'] = divs[0].get_text(strip=True)
+                    if len(divs) >= 2:
+                        raw['location_raw'] = divs[1].get_text(strip=True)
+
+                fb = features_div.find('div', class_='features-b')
+                if fb:
+                    divs = fb.find_all('div')
+                    if len(divs) >= 1:
+                        specs['نوع الوقود'] = divs[0].get_text(strip=True)
+                    if len(divs) >= 2:
+                        specs['المصدر'] = divs[1].get_text(strip=True)
+
+                fc = features_div.find('div', class_='features-c')
+                if fc:
+                    divs = fc.find_all('div')
+                    if len(divs) >= 1:
+                        specs['ناقل الحركة'] = divs[0].get_text(strip=True)
+                    if len(divs) >= 2:
+                        specs['الحالة'] = divs[1].get_text(strip=True)
+
+        # Price button
+        price_btn = item.find('button', class_='btn-contact-p')
+        if price_btn:
+            raw['price_raw'] = price_btn.get_text(strip=True)
+
+        return raw
 
     def _extract_all_images(self, item) -> List[str]:
         """
@@ -385,203 +413,32 @@ class SyriaCarScraper(CarsScraper):
             logger.warning(f"Error extracting images: {e}")
             return []
 
-    def _parse_car_description(self, description_text: str) -> Dict[str, str]:
-        """
-        Parse pipe-delimited car description text into fields
+    def get_statistics(self, items: List[Dict]) -> Dict[str, Any]:
+        """Calculate statistics from scraped items."""
+        if not items:
+            return {'total_items': 0, 'price_stats': {}, 'year_stats': {}, 'brand_stats': {}}
 
-        Example: "كيا Kia | Sportage | إس يو في | 2017 | 225,000 كم | حلب | بنزين | أمريكية | أوتوماتيك | مستعملة"
+        prices = [i.get('price') for i in items if isinstance(i.get('price'), (int, float))]
+        years  = [i.get('year')  for i in items if isinstance(i.get('year'), int)]
+        brands = [i.get('brand') for i in items if i.get('brand')]
 
-        Args:
-            description_text: Pipe-delimited description
-
-        Returns:
-            Dictionary with parsed fields
-        """
-        parsed_data = {}
-
-        try:
-            # Split by pipe and clean
-            segments = [seg.strip() for seg in description_text.split('|')]
-            segments = [seg for seg in segments if seg and seg != '•']
-
-            if not segments:
-                return {'title': 'N/A'}
-
-            # Initialize all fields
-            parsed_data = {
-                'title': segments[0],
-                'make': 'N/A',
-                'model': 'N/A',
-                'body_type': 'N/A',
-                'year': 'N/A',
-                'mileage': 'N/A',
-                'location': 'N/A',
-                'fuel_type': 'N/A',
-                'origin': 'N/A',
-                'transmission': 'N/A',
-                'condition': 'N/A',
-            }
-
-            # Extract make from first segment
-            if len(segments) > 0:
-                parts = segments[0].split()
-                if len(parts) > 0:
-                    parsed_data['make'] = parts[-1]
-
-            # Model is typically second segment
-            if len(segments) > 1 and segments[1]:
-                parsed_data['model'] = segments[1]
-
-            # Body type (check if third segment is a body type)
-            if len(segments) > 2 and self._is_body_type(segments[2]):
-                parsed_data['body_type'] = segments[2]
-
-            # Year (4-digit number between 1990-2030)
-            for seg in segments:
-                if self._is_year(seg):
-                    parsed_data['year'] = seg
-                    break
-
-            # Mileage (number followed by unit)
-            for idx, seg in enumerate(segments):
-                if self._is_mileage(seg):
-                    if idx + 1 < len(segments) and segments[idx + 1] in ['كم', 'km']:
-                        parsed_data['mileage'] = f"{seg} {segments[idx + 1]}"
-                    else:
-                        parsed_data['mileage'] = seg
-                    break
-
-            # Fuel type
-            fuel_keywords = ['بنزين', 'ديزل', 'Gasoline', 'Diesel', 'LPG', 'غاز']
-            for seg in segments:
-                if any(fuel in seg for fuel in fuel_keywords):
-                    parsed_data['fuel_type'] = seg
-                    break
-
-            # Transmission
-            trans_keywords = ['أوتوماتيك', 'يدوي', 'Automatic', 'Manual']
-            for seg in segments:
-                if any(trans in seg for trans in trans_keywords):
-                    parsed_data['transmission'] = seg
-                    break
-
-            # Condition
-            condition_keywords = ['مستعملة', 'جديدة', 'Used', 'New', 'مستخدمة']
-            for seg in segments:
-                if any(cond in seg for cond in condition_keywords):
-                    parsed_data['condition'] = seg
-                    break
-
-            # Origin
-            origin_keywords = ['أمريكية', 'أوروبية', 'يابانية', 'كورية', 'American', 'European', 'Japanese', 'Korean']
-            for seg in segments:
-                if any(orig in seg for orig in origin_keywords):
-                    parsed_data['origin'] = seg
-                    break
-
-            # Location (Arabic city names or near other identifiable fields)
-            location_keywords = ['حلب', 'دمشق', 'حمص', 'اللاذقية', 'درعا', 'السويداء', 'طرطوس', 'قامشلي']
-            for seg in segments:
-                if any(city in seg for city in location_keywords):
-                    parsed_data['location'] = seg
-                    break
-
-            logger.debug(f"Parsed car description: {parsed_data}")
-            return parsed_data
-
-        except Exception as e:
-            logger.error(f"Error parsing car description: {e}")
-            return {'title': description_text[:100] if description_text else 'N/A'}
-
-    def _extract_features(self, features_div, car_data: Dict):
-        """
-        Extract features from the features div in card-info
-
-        Structure:
-        - features-a: mileage and location
-        - features-b: fuel type and origin
-        - features-c: transmission and condition
-
-        Args:
-            features_div: BeautifulSoup element for features div
-            car_data: Dictionary to update with extracted features
-        """
-        try:
-            # Extract features-a (mileage and location)
-            features_a = features_div.find('div', class_='features-a')
-            if features_a:
-                divs = features_a.find_all('div')
-                if len(divs) >= 2:
-                    mileage_text = divs[0].get_text(strip=True)
-                    if mileage_text and mileage_text != 'N/A':
-                        car_data['mileage'] = mileage_text
-
-                    location_text = divs[1].get_text(strip=True)
-                    if location_text and location_text != 'N/A':
-                        car_data['location'] = location_text
-
-            # Extract features-b (fuel type and origin)
-            features_b = features_div.find('div', class_='features-b')
-            if features_b:
-                divs = features_b.find_all('div')
-                if len(divs) >= 2:
-                    fuel_text = divs[0].get_text(strip=True)
-                    if fuel_text and fuel_text != 'N/A':
-                        car_data['fuel_type'] = fuel_text
-
-                    origin_text = divs[1].get_text(strip=True)
-                    if origin_text and origin_text != 'N/A':
-                        car_data['origin'] = origin_text
-
-            # Extract features-c (transmission and condition)
-            features_c = features_div.find('div', class_='features-c')
-            if features_c:
-                divs = features_c.find_all('div')
-                if len(divs) >= 2:
-                    trans_text = divs[0].get_text(strip=True)
-                    if trans_text and trans_text != 'N/A':
-                        car_data['transmission'] = trans_text
-
-                    condition_text = divs[1].get_text(strip=True)
-                    if condition_text and condition_text != 'N/A':
-                        car_data['condition'] = condition_text
-
-            # Extract body type and year from subtitle if available
-            parent_card_info = features_div.find_parent('div', class_='card-info')
-            if parent_card_info:
-                subtitle = parent_card_info.find('h2', class_='car-sub-title')
-                if subtitle:
-                    subtitle_text = subtitle.get_text(strip=True)
-                    # Parse: "Sportage • إس يو في • 2017"
-                    parts = [p.strip() for p in subtitle_text.split('•')]
-                    if len(parts) >= 3:
-                        if car_data.get('model') == 'N/A':
-                            car_data['model'] = parts[0]
-                        if car_data.get('body_type') == 'N/A':
-                            car_data['body_type'] = parts[1]
-                        if car_data.get('year') == 'N/A':
-                            car_data['year'] = parts[2]
-
-        except Exception as e:
-            logger.warning(f"Error extracting features: {e}")
-
-    def _is_year(self, text: str) -> bool:
-        """Check if text is a year (1990-2030)"""
-        try:
-            year = int(text)
-            return 1990 <= year <= 2030
-        except:
-            return False
-
-    def _is_mileage(self, text: str) -> bool:
-        """Check if text is a mileage value"""
-        try:
-            clean_text = text.replace(',', '').replace(' ', '')
-            return clean_text.isdigit() and len(clean_text) >= 3
-        except:
-            return False
-
-    def _is_body_type(self, text: str) -> bool:
-        """Check if text is a body type"""
-        body_types = ['SUV', 'سيدان', 'sedan', 'Sedan', 'إس يو في', 'عربة', 'truck', 'كوبيه', 'coupe', 'هاتشباك', 'hatchback']
-        return any(body in text for body in body_types)
+        return {
+            'total_items': len(items),
+            'price_stats': {
+                'count':   len(prices),
+                'average': round(sum(prices) / len(prices), 2) if prices else 0,
+                'min':     min(prices) if prices else 0,
+                'max':     max(prices) if prices else 0,
+            },
+            'year_stats': {
+                'count':   len(years),
+                'average': int(sum(years) / len(years)) if years else 0,
+                'min':     min(years) if years else 0,
+                'max':     max(years) if years else 0,
+            },
+            'brand_stats': {b: brands.count(b) for b in set(brands)},
+            'items_with_complete_data': sum(
+                1 for i in items
+                if all([i.get('price'), i.get('brand'), i.get('year'), i.get('location')])
+            ),
+        }

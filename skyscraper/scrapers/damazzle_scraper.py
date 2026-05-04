@@ -14,6 +14,7 @@ from typing import List, Dict, Any
 
 from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
+from scrapers import parser as car_parser
 
 logger = logging.getLogger(__name__)
 
@@ -193,136 +194,90 @@ class DamazzleScraper:
 
     def _extract_listing(self, listing_div, primary_image: str = None) -> Dict[str, Any]:
         """
-        Extract a single car listing from HTML
-        Returns all 25 columns from unified schema
-
-        Args:
-            listing_div: BeautifulSoup div containing the listing
-            primary_image: The primary image URL for this listing
-
-        Returns:
-            Dictionary with extracted car data (unified schema)
+        Stage 1 (raw extraction) + Stage 2 (parse) for a single Damazzle card.
+        Raw extraction collects labels/values as-is; parser interprets them.
         """
         try:
-            # Initialize with all 25 unified schema fields
-            item = {
-                'scraped_at': datetime.now().isoformat(),
-                'source': 'damazzle',
-                'id': None,
-                'title': None,
-                'price': None,
-                'price_raw': None,
-                'brand': None,
-                'model': None,  # Not available for Damazzle
-                'category': None,
-                'year': None,
-                'mileage': None,
-                'location': None,
-                'posted_date': None,
-                'condition': None,  # Not available for Damazzle
-                'fuel_type': None,  # Not available for Damazzle
-                'transmission': None,  # Not available for Damazzle
-                'body_type': None,  # Not available for Damazzle
-                'origin': None,  # Not available for Damazzle
-                'image_count': 0,
-                'images': '[]',
-                'primary_image': primary_image,
-                'link': None,
-                'ad_id': None,
-                'ad_url': None,
-                'description': None,  # Not available for Damazzle
-                'listing_type': self.listing_type,  # "sell" or "rent"
-            }
-
-            # Extract price
-            price_elem = listing_div.find('div', class_='text-orange')
-            if price_elem:
-                price_text = price_elem.get_text(strip=True)
-                item['price'] = self._clean_price(price_text)
-                item['price_raw'] = price_text
-
-            # Extract brand (first bg-purple span)
-            brand_spans = listing_div.find_all('span', class_='bg-purple')
-            if brand_spans:
-                item['brand'] = brand_spans[0].get_text(strip=True)
-                # Extract category if available
-                if len(brand_spans) > 1:
-                    item['category'] = brand_spans[1].get_text(strip=True)
-
-            # Extract year and mileage from list items
-            list_items = listing_div.find_all('li')
-            for li in list_items:
-                text = li.get_text(strip=True)
-                # Check if it's a year (4 digits)
-                if re.search(r'\d{4}', text):
-                    year_match = re.search(r'(\d{4})', text)
-                    if year_match:
-                        item['year'] = int(year_match.group(1))
-                # Check if it contains 'كم' (km in Arabic)
-                elif 'كم' in text or 'km' in text.lower():
-                    item['mileage'] = text
-
-            # Extract title
-            title_elem = listing_div.find('h5', class_='product-title')
-            if title_elem:
-                item['title'] = title_elem.get_text(strip=True)
-
-            # Extract location and posted date
-            location_div = listing_div.find('div', class_='text-muted')
-            if location_div:
-                location_text = location_div.get_text(strip=True)
-                # Split by |
-                parts = location_text.split('|')
-                item['location'] = parts[0].strip() if parts else None
-                item['posted_date'] = parts[1].strip() if len(parts) > 1 else None
-
-            # Handle images
-            if primary_image:
-                item['images'] = f'["{primary_image}"]'  # JSON string with one image
-                item['image_count'] = 1
-            else:
-                item['images'] = '[]'
-                item['image_count'] = 0
-
-            # Extract ad ID from WhatsApp link
-            whatsapp_link = listing_div.find('a', class_='btn-whatsapp')
-            if whatsapp_link and whatsapp_link.get('href'):
-                href = whatsapp_link.get('href')
-                # Extract ID from /ads/xxxx format
-                match = re.search(r'/ads/([^&?]+)', href)
-                if match:
-                    ad_id = match.group(1)
-                    item['ad_id'] = ad_id
-                    item['ad_url'] = f"https://damazzle.com/ads/{ad_id}"
-                    # Create unique ID combining source and ad_id
-                    item['id'] = f"damazzle_{ad_id}_{int(datetime.now().timestamp())}"
-                    # Create link
-                    item['link'] = f"https://damazzle.com/ads/{ad_id}"
-
-            return item
-
+            raw = self._extract_raw(listing_div, primary_image)
+            if not raw:
+                return None
+            return car_parser.parse(raw)
         except Exception as e:
             logger.error(f"Error extracting listing: {e}")
             return None
 
-    def _clean_price(self, price_text: str) -> float:
+    def _extract_raw(self, listing_div, primary_image: str = None) -> Dict[str, Any]:
         """
-        Clean and convert price string to float
-
-        Args:
-            price_text: Raw price text (e.g., "17,000 $")
-
-        Returns:
-            Float price value
+        STAGE 1 — Raw extraction only. No interpretation.
+        Puts all Damazzle card data into a neutral raw dict.
         """
-        try:
-            # Remove spaces, currency symbols, and Arabic text
-            cleaned = re.sub(r'[^\d.]', '', price_text)
-            if cleaned:
-                return float(cleaned)
-            return None
-        except (ValueError, TypeError):
-            return None
+        raw = {
+            'source':      'damazzle',
+            'id':          None,
+            'scraped_at':  datetime.now().isoformat(),
+            'listing_type': self.listing_type,
+            'title_raw':       None,
+            'price_raw':       None,
+            'location_raw':    None,
+            'description_raw': None,
+            'ad_url':          None,
+            'ad_id':           None,
+            'specs_raw':       {},
+            'images':          [primary_image] if primary_image else [],
+            'phones_raw':      [],
+            'whatsapp':        None,
+            'seller_raw':      None,
+            'posted_date':     None,
+        }
+
+        # Price
+        price_elem = listing_div.find('div', class_='text-orange')
+        if price_elem:
+            raw['price_raw'] = price_elem.get_text(strip=True)
+
+        # Brand + category (bg-purple spans)
+        brand_spans = listing_div.find_all('span', class_='bg-purple')
+        if brand_spans:
+            raw['specs_raw']['الماركة'] = brand_spans[0].get_text(strip=True)
+            if len(brand_spans) > 1:
+                raw['specs_raw']['الفئة'] = brand_spans[1].get_text(strip=True)
+
+        # Year and mileage from <li> items
+        for li in listing_div.find_all('li'):
+            text = li.get_text(strip=True)
+            if re.search(r'\b\d{4}\b', text):
+                raw['specs_raw']['السنة'] = text
+            elif 'كم' in text or 'km' in text.lower():
+                raw['specs_raw']['الكيلومترات'] = text
+
+        # Title
+        title_elem = listing_div.find('h5', class_='product-title')
+        if title_elem:
+            raw['title_raw'] = title_elem.get_text(strip=True)
+
+        # Location + posted date (text-muted div: "حلب | منذ 3 أيام")
+        loc_div = listing_div.find('div', class_='text-muted')
+        if loc_div:
+            parts = loc_div.get_text(strip=True).split('|')
+            raw['location_raw'] = parts[0].strip() if parts else None
+            raw['posted_date']  = parts[1].strip() if len(parts) > 1 else None
+
+        # Ad ID + WhatsApp from WhatsApp link href
+        wa_link = listing_div.find('a', class_='btn-whatsapp')
+        if wa_link and wa_link.get('href'):
+            href = wa_link['href']
+            m = re.search(r'/ads/([^&?]+)', href)
+            if m:
+                ad_id = m.group(1)
+                raw['ad_id']  = ad_id
+                raw['ad_url'] = f"https://damazzle.com/ads/{ad_id}"
+                raw['id']     = f"damazzle_{ad_id}"
+            # Extract WhatsApp number from wa.me link
+            wa_m = re.search(r'wa\.me/(\d+)', href)
+            if wa_m:
+                raw['whatsapp'] = wa_m.group(1)
+
+        return raw
 
     def get_statistics(self, items: List[Dict]) -> Dict[str, Any]:
         """

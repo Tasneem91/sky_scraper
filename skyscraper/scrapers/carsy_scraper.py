@@ -101,71 +101,110 @@ class CarsyScraper:
                 raise Exception(f"Cannot load {url}: {e}")
 
     # =========================================================================
-    # STAGE 1 — Collect all car links via click-based pagination
+    # STAGE 1 — Collect all car links via URL-based pagination
     # =========================================================================
 
     def _collect_car_links(self) -> List[Dict[str, Any]]:
         """
-        Navigate the listing pages by clicking the Next button.
-        Returns list of dicts: {url, title, price_raw, location, mileage, posted_time}
+        Navigate listing pages by reading the Next Page URL directly from
+        pagination links — then goto() to it. No clicking, no timing issues.
+
+        Logs all pagination links found on each page for easy debugging.
         """
         all_cars: Dict[str, Dict] = {}   # car_id → card data
         page_num = 1
-
-        logger.info(f"[Stage 1] Loading: {self.base_url}")
-        self._goto(self.base_url)
+        current_url = self.base_url
 
         while True:
-            # Wait for car cards to appear
+            logger.info(f"[Stage 1] Page {page_num}: {current_url}")
+            self._goto(current_url)
+
+            # Wait for car cards — if none appear, stop
             try:
                 self.page.wait_for_selector("a[href^='/cars/']", timeout=20000)
             except Exception:
                 logger.warning(f"[Stage 1] No car links on page {page_num} — stopping")
                 break
 
-            # Let React finish rendering
-            time.sleep(1.5)
+            # Extra wait for React to finish rendering all cards
+            time.sleep(2)
 
-            # Extract card data using JavaScript (runs after React renders)
-            cards = self.page.evaluate("""
+            # ------------------------------------------------------------------
+            # Extract card data + pagination info in ONE evaluate() call
+            # ------------------------------------------------------------------
+            result = self.page.evaluate("""
                 () => {
+                    // --- Car cards ---
                     const anchors = Array.from(document.querySelectorAll('a[href]'))
                         .filter(a => /^\\/cars\\/\\d+$/.test(a.getAttribute('href')));
 
-                    return anchors.map(a => {
-                        // Posted time
-                        const clockEl = a.querySelector('[class*="lucide-clock"], svg[class*="clock"]');
+                    const cards = anchors.map(a => {
+                        const clockEl = a.querySelector('[class*="lucide-clock"], svg');
                         const timeSpan = clockEl ? clockEl.nextElementSibling : null;
-
-                        // Title
-                        const titleEl = a.querySelector('h3');
-
-                        // Price (look for $ sign or text-primary span)
-                        const priceSpans = Array.from(a.querySelectorAll('span'));
-                        const priceEl = priceSpans.find(s =>
-                            s.textContent.includes('$') || s.className.includes('text-primary')
+                        const titleEl  = a.querySelector('h3');
+                        const allSpans = Array.from(a.querySelectorAll('span'));
+                        const priceEl  = allSpans.find(s =>
+                            s.textContent.includes('$') || (s.className && s.className.includes('text-primary'))
                         );
-
-                        // Location (after map-pin icon)
-                        const mapEl = a.querySelector('[class*="lucide-map-pin"], svg[class*="map-pin"]');
+                        const mapEl   = a.querySelector('[class*="lucide-map-pin"]');
                         const locSpan = mapEl ? mapEl.nextElementSibling : null;
-
-                        // Mileage (after gauge icon)
-                        const gaugeEl = a.querySelector('[class*="lucide-gauge"], svg[class*="gauge"]');
-                        const milSpan = gaugeEl ? gaugeEl.nextElementSibling : null;
+                        const gaugeEl  = a.querySelector('[class*="lucide-gauge"]');
+                        const milSpan  = gaugeEl ? gaugeEl.nextElementSibling : null;
 
                         return {
-                            href: a.getAttribute('href'),
+                            href:        a.getAttribute('href'),
                             posted_time: timeSpan ? timeSpan.textContent.trim() : null,
-                            title: titleEl ? titleEl.textContent.trim() : null,
-                            price_raw: priceEl ? priceEl.textContent.trim() : null,
-                            location: locSpan ? locSpan.textContent.trim() : null,
-                            mileage: milSpan ? milSpan.textContent.trim() : null,
+                            title:       titleEl  ? titleEl.textContent.trim()  : null,
+                            price_raw:   priceEl  ? priceEl.textContent.trim()  : null,
+                            location:    locSpan  ? locSpan.textContent.trim()  : null,
+                            mileage:     milSpan  ? milSpan.textContent.trim()  : null,
                         };
                     });
+
+                    // --- Pagination: find ALL links that look like page links ---
+                    const allLinks = Array.from(document.querySelectorAll('a[href]'));
+
+                    // Collect every href that contains a page indicator
+                    const pageLinks = allLinks
+                        .map(a => a.href)
+                        .filter(h => h && (
+                            /[?&]page=\\d+/.test(h) ||
+                            /\\/page\\/\\d+/.test(h)
+                        ));
+
+                    // Deduplicate
+                    const uniquePageLinks = [...new Set(pageLinks)];
+
+                    // Next page: try aria-label first
+                    const nextEl = allLinks.find(a =>
+                        a.getAttribute('aria-label') &&
+                        (a.getAttribute('aria-label').toLowerCase().includes('next') ||
+                         a.getAttribute('aria-label').includes('التالي') ||
+                         a.getAttribute('aria-label').includes('الصفحة التالية')) &&
+                        a.href &&
+                        !a.className.includes('pointer-events-none') &&
+                        !a.closest('[disabled]')
+                    );
+                    const nextUrl = nextEl ? nextEl.href : null;
+
+                    // Current page number from URL or active element
+                    const urlMatch = window.location.search.match(/[?&]page=(\\d+)/);
+                    const currentPage = urlMatch ? parseInt(urlMatch[1]) : 1;
+
+                    return { cards, pageLinks: uniquePageLinks, nextUrl, currentPage };
                 }
             """)
 
+            cards      = result.get('cards', [])
+            page_links = result.get('pageLinks', [])
+            next_url   = result.get('nextUrl')
+            current_pg = result.get('currentPage', page_num)
+
+            # Log pagination links discovered — crucial for debugging
+            logger.info(f"[Stage 1] Page {page_num}: found {len(page_links)} pagination links: {page_links[:5]}")
+            logger.info(f"[Stage 1] Next URL from aria-label: {next_url}")
+
+            # Add new cars
             new_count = 0
             for card in cards:
                 href = card.get('href', '')
@@ -182,81 +221,54 @@ class CarsyScraper:
             logger.info(f"[Stage 1] Page {page_num}: +{new_count} new cars (total: {len(all_cars)})")
 
             if new_count == 0:
-                logger.info("[Stage 1] No new cars — stopping pagination")
+                logger.info("[Stage 1] No new cars on this page — done")
                 break
 
-            # Try to click next page button
-            if not self._click_next_page():
-                logger.info("[Stage 1] No next page button found — all pages done")
-                break
+            # ------------------------------------------------------------------
+            # Find next page URL — try multiple strategies
+            # ------------------------------------------------------------------
+            next_page_url = None
 
+            # Strategy 1: aria-label next link
+            if next_url:
+                next_page_url = next_url
+                logger.info(f"[Stage 1] Next page via aria-label: {next_page_url}")
+
+            # Strategy 2: find page=N+1 link in pagination links
+            if not next_page_url:
+                next_pg = current_pg + 1
+                for link in page_links:
+                    if f'page={next_pg}' in link or f'/page/{next_pg}' in link:
+                        next_page_url = link
+                        logger.info(f"[Stage 1] Next page via page-link scan: {next_page_url}")
+                        break
+
+            # Strategy 3: build URL manually using same pattern as page 1
+            if not next_page_url and page_links:
+                # Derive pattern from first page link found
+                sample = page_links[0]
+                next_pg = current_pg + 1
+                if '?page=' in sample:
+                    next_page_url = re.sub(r'\?page=\d+', f'?page={next_pg}', sample)
+                elif '&page=' in sample:
+                    next_page_url = re.sub(r'&page=\d+', f'&page={next_pg}', sample)
+                elif '/page/' in sample:
+                    next_page_url = re.sub(r'/page/\d+', f'/page/{next_pg}', sample)
+                if next_page_url:
+                    logger.info(f"[Stage 1] Next page via pattern derivation: {next_page_url}")
+
+            # Strategy 4: fallback — append ?page=N to base URL
+            if not next_page_url:
+                next_pg = current_pg + 1
+                sep = '&' if '?' in self.base_url else '?'
+                next_page_url = f"{self.base_url}{sep}page={next_pg}"
+                logger.info(f"[Stage 1] Next page via fallback construction: {next_page_url}")
+
+            current_url = next_page_url
             page_num += 1
 
-        logger.info(f"[Stage 1] Done. Total links collected: {len(all_cars)}")
+        logger.info(f"[Stage 1] Complete. Total links: {len(all_cars)}")
         return list(all_cars.values())
-
-    def _click_next_page(self) -> bool:
-        """
-        Find and click the next-page button using JavaScript.
-        Returns True if successfully clicked, False if no button found.
-        """
-        clicked = self.page.evaluate("""
-            () => {
-                // Try aria-label selectors first
-                const ariaSelectors = [
-                    'button[aria-label*="next" i]',
-                    'button[aria-label*="التالي"]',
-                    'a[aria-label*="next" i]',
-                    'button[aria-label*="Next"]',
-                ];
-                for (const sel of ariaSelectors) {
-                    const el = document.querySelector(sel);
-                    if (el && !el.disabled && !el.hasAttribute('disabled')) {
-                        el.click();
-                        return true;
-                    }
-                }
-
-                // Look for buttons containing التالي (Arabic "Next")
-                const allBtns = Array.from(document.querySelectorAll('button, a[role="button"]'));
-                const nextBtn = allBtns.find(b =>
-                    (b.textContent.trim() === 'التالي' ||
-                     b.textContent.trim() === 'Next' ||
-                     b.getAttribute('aria-label') === 'التالي') &&
-                    !b.disabled && !b.hasAttribute('disabled') &&
-                    b.offsetParent !== null   // visible
-                );
-                if (nextBtn) {
-                    nextBtn.click();
-                    return true;
-                }
-
-                // Try SVG chevron-right button (common in pagination)
-                const chevronBtns = Array.from(document.querySelectorAll('button'));
-                const chevronBtn = chevronBtns.find(b => {
-                    const svg = b.querySelector('svg');
-                    return svg && (
-                        svg.className.toString().includes('chevron-right') ||
-                        svg.className.toString().includes('ChevronRight') ||
-                        b.querySelector('[class*="chevron-right"]')
-                    ) && !b.disabled && !b.hasAttribute('disabled');
-                });
-                if (chevronBtn) {
-                    chevronBtn.click();
-                    return true;
-                }
-
-                return false;
-            }
-        """)
-
-        if clicked:
-            try:
-                self.page.wait_for_load_state('networkidle', timeout=15000)
-            except Exception:
-                time.sleep(2)
-            return True
-        return False
 
     # =========================================================================
     # STAGE 2 — Scrape each car detail page via JavaScript

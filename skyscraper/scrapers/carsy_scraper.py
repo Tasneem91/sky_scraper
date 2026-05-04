@@ -101,110 +101,93 @@ class CarsyScraper:
                 raise Exception(f"Cannot load {url}: {e}")
 
     # =========================================================================
-    # STAGE 1 — Collect all car links via URL-based pagination
+    # STAGE 1 — Collect all car links via React click-based pagination
     # =========================================================================
+    # KEY FACTS (confirmed via live DOM inspection):
+    #   - Pagination <a> tags have NO href — purely React state-driven
+    #   - URL never changes after clicking (window.location.search stays "")
+    #   - Next button: a[data-slot="pagination-link"][aria-label="الذهاب إلى الصفحة التالية"]
+    #   - Disabled state: class includes "pointer-events-none opacity-50"
+    #   - 50 total pages (~989 cars, 20 per page)
+    #   - Page change detected by watching first car href change in DOM
 
     def _collect_car_links(self) -> List[Dict[str, Any]]:
         """
-        Navigate listing pages by reading the Next Page URL directly from
-        pagination links — then goto() to it. No clicking, no timing issues.
-
-        Logs all pagination links found on each page for easy debugging.
+        Collect all car links by clicking التالي and waiting for React to re-render.
+        Detects page change by monitoring when the first car's href changes.
         """
-        all_cars: Dict[str, Dict] = {}   # car_id → card data
+        all_cars: Dict[str, Dict] = {}
         page_num = 1
-        current_url = self.base_url
+
+        logger.info(f"[Stage 1] Loading listing page: {self.base_url}")
+        self._goto(self.base_url)
 
         while True:
-            logger.info(f"[Stage 1] Page {page_num}: {current_url}")
-            self._goto(current_url)
-
-            # Wait for car cards — if none appear, stop
+            # Wait for car cards
             try:
                 self.page.wait_for_selector("a[href^='/cars/']", timeout=20000)
             except Exception:
                 logger.warning(f"[Stage 1] No car links on page {page_num} — stopping")
                 break
 
-            # Extra wait for React to finish rendering all cards
+            # Wait for React to finish rendering
             time.sleep(2)
 
-            # ------------------------------------------------------------------
-            # Extract card data + pagination info in ONE evaluate() call
-            # ------------------------------------------------------------------
-            result = self.page.evaluate("""
+            # Record first car href BEFORE clicking — used to detect page change
+            first_car_href_before = self.page.evaluate("""
                 () => {
-                    // --- Car cards ---
+                    const first = Array.from(document.querySelectorAll('a[href]'))
+                        .find(a => /^\\/cars\\/\\d+$/.test(a.getAttribute('href')));
+                    return first ? first.getAttribute('href') : null;
+                }
+            """)
+
+            # Extract all car cards on this page
+            cards = self.page.evaluate("""
+                () => {
                     const anchors = Array.from(document.querySelectorAll('a[href]'))
                         .filter(a => /^\\/cars\\/\\d+$/.test(a.getAttribute('href')));
 
-                    const cards = anchors.map(a => {
-                        const clockEl = a.querySelector('[class*="lucide-clock"], svg');
-                        const timeSpan = clockEl ? clockEl.nextElementSibling : null;
-                        const titleEl  = a.querySelector('h3');
-                        const allSpans = Array.from(a.querySelectorAll('span'));
-                        const priceEl  = allSpans.find(s =>
-                            s.textContent.includes('$') || (s.className && s.className.includes('text-primary'))
+                    return anchors.map(a => {
+                        // Time posted (next to clock icon)
+                        const allSvgs = Array.from(a.querySelectorAll('svg'));
+                        const clockSvg = allSvgs.find(s =>
+                            s.querySelector('circle') ||
+                            (s.className && s.className.toString().includes('clock'))
                         );
-                        const mapEl   = a.querySelector('[class*="lucide-map-pin"]');
-                        const locSpan = mapEl ? mapEl.nextElementSibling : null;
-                        const gaugeEl  = a.querySelector('[class*="lucide-gauge"]');
-                        const milSpan  = gaugeEl ? gaugeEl.nextElementSibling : null;
+                        const timeSpan = clockSvg ? clockSvg.nextElementSibling : null;
+
+                        // Title
+                        const titleEl = a.querySelector('h3');
+
+                        // Price
+                        const allSpans = Array.from(a.querySelectorAll('span'));
+                        const priceEl = allSpans.find(s =>
+                            s.textContent.trim().includes('$')
+                        );
+
+                        // Location (span.capitalize)
+                        const locEl = a.querySelector('span.capitalize');
+
+                        // Mileage (after gauge icon — look for span with +number or number,)
+                        const mileageEl = allSpans.find(s =>
+                            /^[+]?[\d,]+$/.test(s.textContent.trim()) ||
+                            s.textContent.trim().startsWith('+')
+                        );
 
                         return {
                             href:        a.getAttribute('href'),
                             posted_time: timeSpan ? timeSpan.textContent.trim() : null,
                             title:       titleEl  ? titleEl.textContent.trim()  : null,
                             price_raw:   priceEl  ? priceEl.textContent.trim()  : null,
-                            location:    locSpan  ? locSpan.textContent.trim()  : null,
-                            mileage:     milSpan  ? milSpan.textContent.trim()  : null,
+                            location:    locEl    ? locEl.textContent.trim()    : null,
+                            mileage:     mileageEl ? mileageEl.textContent.trim() : null,
                         };
                     });
-
-                    // --- Pagination: find ALL links that look like page links ---
-                    const allLinks = Array.from(document.querySelectorAll('a[href]'));
-
-                    // Collect every href that contains a page indicator
-                    const pageLinks = allLinks
-                        .map(a => a.href)
-                        .filter(h => h && (
-                            /[?&]page=\\d+/.test(h) ||
-                            /\\/page\\/\\d+/.test(h)
-                        ));
-
-                    // Deduplicate
-                    const uniquePageLinks = [...new Set(pageLinks)];
-
-                    // Next page: try aria-label first
-                    const nextEl = allLinks.find(a =>
-                        a.getAttribute('aria-label') &&
-                        (a.getAttribute('aria-label').toLowerCase().includes('next') ||
-                         a.getAttribute('aria-label').includes('التالي') ||
-                         a.getAttribute('aria-label').includes('الصفحة التالية')) &&
-                        a.href &&
-                        !a.className.includes('pointer-events-none') &&
-                        !a.closest('[disabled]')
-                    );
-                    const nextUrl = nextEl ? nextEl.href : null;
-
-                    // Current page number from URL or active element
-                    const urlMatch = window.location.search.match(/[?&]page=(\\d+)/);
-                    const currentPage = urlMatch ? parseInt(urlMatch[1]) : 1;
-
-                    return { cards, pageLinks: uniquePageLinks, nextUrl, currentPage };
                 }
             """)
 
-            cards      = result.get('cards', [])
-            page_links = result.get('pageLinks', [])
-            next_url   = result.get('nextUrl')
-            current_pg = result.get('currentPage', page_num)
-
-            # Log pagination links discovered — crucial for debugging
-            logger.info(f"[Stage 1] Page {page_num}: found {len(page_links)} pagination links: {page_links[:5]}")
-            logger.info(f"[Stage 1] Next URL from aria-label: {next_url}")
-
-            # Add new cars
+            # Add new cars to collection
             new_count = 0
             for card in cards:
                 href = card.get('href', '')
@@ -221,50 +204,52 @@ class CarsyScraper:
             logger.info(f"[Stage 1] Page {page_num}: +{new_count} new cars (total: {len(all_cars)})")
 
             if new_count == 0:
-                logger.info("[Stage 1] No new cars on this page — done")
+                logger.info("[Stage 1] No new cars — done")
                 break
 
             # ------------------------------------------------------------------
-            # Find next page URL — try multiple strategies
+            # Click التالي button (exact selector confirmed via live DOM analysis)
+            # aria-label="الذهاب إلى الصفحة التالية"
+            # Disabled when class includes "pointer-events-none"
             # ------------------------------------------------------------------
-            next_page_url = None
+            next_available = self.page.evaluate("""
+                () => {
+                    const btn = document.querySelector(
+                        'a[data-slot="pagination-link"][aria-label="الذهاب إلى الصفحة التالية"]'
+                    );
+                    if (!btn) return 'not-found';
+                    if (btn.className.includes('pointer-events-none')) return 'disabled';
+                    btn.click();
+                    return 'clicked';
+                }
+            """)
 
-            # Strategy 1: aria-label next link
-            if next_url:
-                next_page_url = next_url
-                logger.info(f"[Stage 1] Next page via aria-label: {next_page_url}")
+            logger.info(f"[Stage 1] Next button status: {next_available}")
 
-            # Strategy 2: find page=N+1 link in pagination links
-            if not next_page_url:
-                next_pg = current_pg + 1
-                for link in page_links:
-                    if f'page={next_pg}' in link or f'/page/{next_pg}' in link:
-                        next_page_url = link
-                        logger.info(f"[Stage 1] Next page via page-link scan: {next_page_url}")
-                        break
+            if next_available != 'clicked':
+                logger.info(f"[Stage 1] Stopping — next button: {next_available}")
+                break
 
-            # Strategy 3: build URL manually using same pattern as page 1
-            if not next_page_url and page_links:
-                # Derive pattern from first page link found
-                sample = page_links[0]
-                next_pg = current_pg + 1
-                if '?page=' in sample:
-                    next_page_url = re.sub(r'\?page=\d+', f'?page={next_pg}', sample)
-                elif '&page=' in sample:
-                    next_page_url = re.sub(r'&page=\d+', f'&page={next_pg}', sample)
-                elif '/page/' in sample:
-                    next_page_url = re.sub(r'/page/\d+', f'/page/{next_pg}', sample)
-                if next_page_url:
-                    logger.info(f"[Stage 1] Next page via pattern derivation: {next_page_url}")
+            # ------------------------------------------------------------------
+            # Wait for React to re-render new page content
+            # Detect change by watching first car href — it changes when new
+            # cars are rendered (URL itself never changes on this site)
+            # ------------------------------------------------------------------
+            try:
+                self.page.wait_for_function(
+                    """(prevHref) => {
+                        const first = Array.from(document.querySelectorAll('a[href]'))
+                            .find(a => /^\\/cars\\/\\d+$/.test(a.getAttribute('href')));
+                        return first && first.getAttribute('href') !== prevHref;
+                    }""",
+                    arg=first_car_href_before,
+                    timeout=15000
+                )
+                logger.info(f"[Stage 1] Page changed — first car href updated")
+            except Exception:
+                logger.warning("[Stage 1] wait_for_function timed out — sleeping 3s as fallback")
+                time.sleep(3)
 
-            # Strategy 4: fallback — append ?page=N to base URL
-            if not next_page_url:
-                next_pg = current_pg + 1
-                sep = '&' if '?' in self.base_url else '?'
-                next_page_url = f"{self.base_url}{sep}page={next_pg}"
-                logger.info(f"[Stage 1] Next page via fallback construction: {next_page_url}")
-
-            current_url = next_page_url
             page_num += 1
 
         logger.info(f"[Stage 1] Complete. Total links: {len(all_cars)}")
@@ -305,18 +290,46 @@ class CarsyScraper:
 
                     // -------------------------------------------------------
                     // 1. Extract all spec items
-                    //    Each spec: <div class="flex flex-col gap-1 ...">
-                    //                 <span class="...muted...">LABEL</span>
-                    //                 <span class="font-medium">VALUE</span>
-                    //               </div>
+                    //    Strategy A: find every muted label span, get next
+                    //    sibling font-medium value span (handles icon wrappers)
+                    //    Strategy B: find bg-muted/50 containers directly
                     // -------------------------------------------------------
-                    const allDivs = Array.from(document.querySelectorAll('div'));
-                    allDivs.forEach(div => {
-                        const spans = Array.from(div.children).filter(el => el.tagName === 'SPAN');
-                        if (spans.length === 2) {
-                            const label = spans[0].textContent.trim();
-                            const value = spans[1].textContent.trim();
-                            if (label && value && label !== value) {
+                    // Strategy A — label spans with text-muted-foreground
+                    const labelSpans = Array.from(document.querySelectorAll('span'))
+                        .filter(s => s.className &&
+                            s.className.includes('muted-foreground') &&
+                            s.className.includes('text-sm'));
+
+                    labelSpans.forEach(labelSpan => {
+                        const label = labelSpan.textContent.trim();
+                        if (!label) return;
+                        // Value is next sibling span with font-medium, or
+                        // next sibling of label's parent div
+                        let valueEl = labelSpan.nextElementSibling;
+                        if (!valueEl) {
+                            // label might be inside a wrapper div; try parent's next sib
+                            const parent = labelSpan.parentElement;
+                            valueEl = parent ? parent.nextElementSibling : null;
+                        }
+                        if (valueEl) {
+                            const value = valueEl.textContent.trim();
+                            if (value && value !== label) {
+                                result.specs[label] = value;
+                            }
+                        }
+                    });
+
+                    // Strategy B — bg-muted containers (spec grid items)
+                    const specContainers = Array.from(document.querySelectorAll('div'))
+                        .filter(d => d.className && d.className.includes('bg-muted'));
+                    specContainers.forEach(container => {
+                        const allSpans = Array.from(container.querySelectorAll('span'));
+                        const labelEl = allSpans.find(s => s.className && s.className.includes('muted-foreground'));
+                        const valueEl = allSpans.find(s => s.className && s.className.includes('font-medium'));
+                        if (labelEl && valueEl) {
+                            const label = labelEl.textContent.trim();
+                            const value = valueEl.textContent.trim();
+                            if (label && value && label !== value && !result.specs[label]) {
                                 result.specs[label] = value;
                             }
                         }

@@ -39,8 +39,11 @@ class KilometrageScraper:
         try:
             self.playwright = sync_playwright().start()
             self.browser = self.playwright.chromium.launch()
-            self.page = self.browser.new_page()
-            logger.info("Playwright browser initialized")
+            # Add user-agent to avoid blocking
+            self.page = self.browser.new_page(
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            )
+            logger.info("Playwright browser initialized with user-agent")
         except Exception as e:
             logger.error(f"Error initializing Playwright: {e}")
             raise
@@ -80,8 +83,13 @@ class KilometrageScraper:
                     logger.info(f"Scraping page {page}")
                     url = f"{self.base_url}?page={page}" if page > 1 else self.base_url
 
-                    # Navigate to page
-                    self.page.goto(url, wait_until='networkidle', timeout=30000)
+                    # Navigate to page with increased timeout and different wait strategy
+                    # Try 'load' first (faster), fallback to 'networkidle' if needed
+                    try:
+                        self.page.goto(url, wait_until='load', timeout=60000)
+                    except Exception as load_error:
+                        logger.warning(f"'load' strategy timeout, trying 'networkidle': {load_error}")
+                        self.page.goto(url, wait_until='networkidle', timeout=60000)
 
                     # Wait for car listings to render
                     try:

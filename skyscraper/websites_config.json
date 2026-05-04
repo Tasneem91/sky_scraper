@@ -55,7 +55,7 @@
       "type": "cars",
       "scraper_class": "KilometrageScraper",
       "scraper_file": "scrapers/kilometrage_scraper.py",
-      "google_sheet_id": "YOUR-SHEET-ID-HERE",
+      "google_sheet_id": "1laCgWpDwFHSpbyrHUjffG2AxHf5piXOBhISrOTWnRZ4",
       "enabled": true,
       "priority": 3,
       "image_folder": "images/kilometrage",
@@ -65,7 +65,7 @@
         "day": "Wednesday",
         "time": "11:00"
       },
-      "last_run": null,
+      "last_run": "2026-05-04T08:21:28.511629",
       "total_items": 0,
       "last_run_count": 0
     },

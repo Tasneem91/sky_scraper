@@ -77,7 +77,7 @@
       "type": "cars",
       "scraper_class": "CarsyScraper",
       "scraper_file": "scrapers/carsy_scraper.py",
-      "google_sheet_id": "YOUR-SHEET-ID-HERE",
+      "google_sheet_id": "1Y6VE8uF7kDiwUPgINqRaMO4afwsTT9AqmBZNTNGP5hs",
       "enabled": true,
       "priority": 4,
       "image_folder": "images/carsy",
@@ -87,9 +87,9 @@
         "day": "Thursday",
         "time": "10:00"
       },
-      "last_run": null,
-      "total_items": 0,
-      "last_run_count": 0
+      "last_run": "2026-05-04T10:14:13.180620",
+      "total_items": 20,
+      "last_run_count": 20
     },
     {
       "id": "website3",

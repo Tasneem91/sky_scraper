@@ -129,27 +129,27 @@ CUTOFF_DATE           = '2026-01-01'   # skip listings published before this
 SLUG_MAP: Dict[str, str] = {
     'traveled_distance':    'mileage',
     'year_of_manufacture':  'year',
-    'color':                'color',
-    'Color':                'color',         # detail endpoint capitalisation
-    'exterior_color':       'color',
+    'color':                'exterior_color',
+    'Color':                'exterior_color',
+    'exterior_color':       'exterior_color',
     'interior_color':       'interior_color',
     'fuel_type':            'fuel_type',
-    'Fuel_type':            'fuel_type',     # detail endpoint capitalisation
+    'Fuel_type':            'fuel_type',
     'transmission':         'transmission',
-    'Transmission':         'transmission',  # detail endpoint uses capital T
+    'Transmission':         'transmission',
     'gearbox':              'transmission',
     'condition':            'condition',
-    'Condition':            'condition',     # detail endpoint uses capital C
+    'Condition':            'condition',
     'car_condition':        'condition',
-    'engine_capacity':      'engine',
-    'engine':               'engine',
+    'engine_capacity':      'engine_size',
+    'engine':               'engine_size',
     'body_type':            'body_type',
     'drive_system':         'drive_system',
     'drive_type':           'drive_system',
     'doors':                'doors',
     'cylinders':            'cylinders',
-    'vin':                  'vin',
-    'chassis':              'vin',
+    'vin':                  'chassis_number',
+    'chassis':              'chassis_number',
 }
 
 # Also map Arabic label text as fallback
@@ -159,8 +159,8 @@ LABEL_MAP: Dict[str, str] = {
     'الكيلومتراج':       'mileage',
     'سنة الصنع':         'year',
     'السنة':             'year',
-    'اللون':             'color',
-    'اللون الخارجي':     'color',
+    'اللون':             'exterior_color',
+    'اللون الخارجي':     'exterior_color',
     'اللون الداخلي':     'interior_color',
     'نوع الوقود':        'fuel_type',
     'الوقود':            'fuel_type',
@@ -168,8 +168,8 @@ LABEL_MAP: Dict[str, str] = {
     'الغيار':            'transmission',
     'الحالة':            'condition',
     'الشروط':            'condition',
-    'المحرك':            'engine',
-    'سعة المحرك':        'engine',
+    'المحرك':            'engine_size',
+    'سعة المحرك':        'engine_size',
     'نوع الجسم':         'body_type',
     'نظام الدفع':        'drive_system',
     'نوع الدفع':         'drive_system',
@@ -177,44 +177,25 @@ LABEL_MAP: Dict[str, str] = {
     'عدد الابواب':       'doors',
     'السلندرات':         'cylinders',
     'عدد السلندرات':     'cylinders',
-    'رقم الهيكل':        'vin',
-    'رقم الشاصي':        'vin',
+    'رقم الهيكل':        'chassis_number',
+    'رقم الشاصي':        'chassis_number',
 }
 
 # ── Sheet columns ─────────────────────────────────────────────────────────────
 
 COLUMNS: List[str] = [
-    'scraped_at',
-    'date_added',           # listing published date (YYYY-MM-DD)
-    'source',
-    'id',
-    'category',
-    'ad_title',
-    'listing_type',
-    'condition',
-    'body_type',
-    'brand',
-    'model',
-    'price',
-    'location',
-    'year',
-    'drive_system',
-    'transmission',
-    'fuel_type',
-    'mileage',
-    'engine',
-    'cylinders',
-    'color',
-    'interior_color',
-    'doors',
-    'vin',
-    'description',
-    'seller_name',
-    'contact',
-    'images',                # Drive view links (comma-separated)
-    'image_folder_url',      # per-car Drive sub-folder link
-    'images_original_links', # original Damazzle CDN URLs
-    'car_url',               # detail page link
+    'id', 'source', 'car_url',
+    'make', 'model', 'year', 'body_type',
+    'exterior_color', 'interior_color',
+    'fuel_type', 'engine_size', 'cylinders', 'horsepower',
+    'transmission', 'doors', 'seats', 'steering_side',
+    'origin', 'condition', 'chassis_condition', 'warranty', 'chassis_number',
+    'city', 'mileage', 'price',
+    'date_added', 'views',
+    'phone', 'listing_id',
+    'seller_name', 'seller_type', 'seller_listings',
+    'description_original',
+    'images_original_links', 'images_drive_links',
 ]
 
 # ── OAuth2 helpers ────────────────────────────────────────────────────────────
@@ -432,7 +413,7 @@ def _parse_description_specs(data: Dict, description: str) -> None:
             if loc_m:
                 loc = _clean(loc_m.group(1))
                 if loc:
-                    _set_field(data, 'location', loc)
+                    _set_field(data, 'city', loc)
                     break
 
     # ── 3. Mileage in free text: "ماشية 186000" / "80 الف كيلو" ────────────
@@ -740,8 +721,7 @@ class DamazzleScraper:
 
         try:
             id_col         = header.index('id')
-            images_col     = header.index('images')
-            img_folder_col = header.index('image_folder_url')
+            images_col     = header.index('images_drive_links')
             orig_col       = header.index('images_original_links')
             url_col        = header.index('car_url') if 'car_url' in header else -1
         except ValueError as exc:
@@ -820,8 +800,7 @@ class DamazzleScraper:
             # Step 4: update ONLY the images + image_folder_url cells
             if image_links or folder_url:
                 try:
-                    self.sheet.update_cell(row_num, images_col + 1,     ', '.join(image_links))
-                    self.sheet.update_cell(row_num, img_folder_col + 1, folder_url)
+                    self.sheet.update_cell(row_num, images_col + 1, ', '.join(image_links))
                     repaired += 1
                     logger.info(f'  [{row_num}] ✓ {row_id} updated')
                 except Exception as exc:
@@ -929,17 +908,17 @@ class DamazzleScraper:
         if price:
             data['price'] = price   # "10,300"
 
-        # ── Governorate → location (may be refined by description later) ──────
+        # ── Governorate → city ────────────────────────────────────────────────
         gov = car.get('governorate') or {}
         loc = _clean(gov.get('name_ar') or gov.get('name', ''))
         if loc:
-            data['location'] = loc
+            data['city'] = loc
 
-        # ── Category → brand (e.g. "ميني" / "Mini") ──────────────────────────
+        # ── Category → make ───────────────────────────────────────────────────
         cat = car.get('category') or {}
         brand_from_cat = _clean(cat.get('name_ar') or cat.get('name', ''))
         if brand_from_cat and brand_from_cat not in ('سيارات', 'Cars', 'Motors', 'محركات'):
-            _set_field(data, 'brand', brand_from_cat)
+            _set_field(data, 'make', brand_from_cat)
 
         # ── Structured specs from featured_fields (mileage, year) ────────────
         _extract_from_featured_fields(data, car.get('featured_fields') or [])
@@ -948,7 +927,7 @@ class DamazzleScraper:
         raw_desc = car.get('description') or car.get('description_ar') or ''
         desc = _clean_desc(raw_desc)   # strips <p> tags, &nbsp;, etc.
         if desc:
-            data['description'] = desc
+            data['description_original'] = desc
             # Parse bullet-point specs that aren't in featured_fields:
             # condition, transmission, fuel_type, color, model, engine, …
             _parse_description_specs(data, desc)
@@ -963,14 +942,14 @@ class DamazzleScraper:
         phone    = _clean(str(car.get('phone') or ''))
         whatsapp = _clean(str(car.get('whatsapp') or ''))
         if phone and phone not in ('None', 'null', '0', ''):
-            data['contact'] = phone
+            data['phone'] = phone
             if whatsapp and whatsapp != phone:
                 wa_digits = re.sub(r'\D', '', whatsapp)
                 ph_digits = re.sub(r'\D', '', phone)
                 if wa_digits != ph_digits:
-                    data['contact'] = f'{phone} / WA:{whatsapp}'
+                    data['phone'] = f'{phone} / WA:{whatsapp}'
         elif whatsapp and whatsapp not in ('None', 'null', '0', ''):
-            data['contact'] = f'WA:{whatsapp}'
+            data['phone'] = f'WA:{whatsapp}'
 
         # ── Images ────────────────────────────────────────────────────────────
         gallery = car.get('gallery') or []
@@ -1028,8 +1007,7 @@ class DamazzleScraper:
             except Exception as exc:
                 logger.error(f'  Drive error for {car_id}: {exc}')
 
-        data['images']           = ', '.join(image_links)
-        data['image_folder_url'] = folder_url
+        data['images_drive_links'] = ', '.join(image_links)
 
         # Normalize fields to Sayarti canonical values
         data = normalize_car(data)

@@ -546,25 +546,40 @@ class SheetManager:
     def _ensure_header(self):
         first = self.ws.row_values(1)
         if not first:
+            # Completely empty sheet
             self.ws.insert_row(COLUMNS, 1)
             return
         if first == COLUMNS:
             return
-        # Non-destructive path: existing header is a subset of COLUMNS
-        # (columns were added to COLUMNS but the sheet still has the old header).
-        existing = set(first)
-        new_cols = [c for c in COLUMNS if c not in existing]
-        if new_cols and all(c in COLUMNS for c in first):
+
+        existing_set = set(first)
+        needed_set   = set(COLUMNS)
+
+        # ── All required columns already present (order may differ) ──────────
+        # This happens when a previous run added new columns at the end of
+        # the sheet (different position than COLUMNS definition).
+        # Safe to do nothing — append_row() uses dict lookup, not position.
+        if needed_set.issubset(existing_set):
+            return
+
+        # ── New columns added to COLUMNS that aren't in the sheet yet ────────
+        if existing_set.issubset(needed_set):
+            new_cols = [c for c in COLUMNS if c not in existing_set]
             next_col = len(first) + 1
             for col_name in new_cols:
                 self.ws.update_cell(1, next_col, col_name)
                 next_col += 1
             logger.info(f'Sheet header extended — added columns: {new_cols}')
-        else:
-            # Major schema mismatch (e.g. fresh sheet or corrupted header) — reset
-            logger.warning('Header mismatch — clearing sheet and rewriting header')
-            self.ws.clear()
-            self.ws.insert_row(COLUMNS, 1)
+            return
+
+        # ── Truly incompatible header (unexpected columns present) ────────────
+        # Only reaches here if the sheet has columns that are NOT in COLUMNS at
+        # all — i.e. a completely different schema.  Log and do NOT auto-clear.
+        unknown_cols = existing_set - needed_set
+        logger.warning(
+            f'Sheet has unexpected columns not in COLUMNS: {unknown_cols}. '
+            f'Header left as-is — manual review required.'
+        )
 
     def _load_existing_ids(self):
         vals = self.ws.col_values(1)  # column A = id

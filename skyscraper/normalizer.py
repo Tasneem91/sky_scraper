@@ -814,17 +814,13 @@ def normalize_car(car: dict) -> dict:
         norm_model = _MODEL_ALIASES.get(alias_key)
 
         if norm_model is not None:
-            # Known alias → use Arabic canonical name
+            # Known alias → use canonical name from alias map
             result['model'] = norm_model
 
-        elif _is_short_or_numeric(clean):
-            # Step 3b (ROADMAP §6): short code or contains digits → keep as
-            # ENGLISH CAPITALS.  Fuzzy matching would corrupt "X5" → "اكس5",
-            # "GLE" → something Arabic, etc.
-            result['model'] = clean.upper()
-
         else:
-            # Step 4: brand-context fuzzy matching (Arabic models only)
+            # Step 4: fuzzy match against car_models_FULL.json (primary reference).
+            # The file's form is always canonical — Arabic or English, whatever is
+            # stored there.  We check the file BEFORE applying any fallback rule.
             brand_models = _car_models.get(norm_make, [])
             if brand_models:
                 matched = _best_match(clean, brand_models)
@@ -833,9 +829,17 @@ def normalize_car(car: dict) -> dict:
                 matched = _best_match(clean, all_models)
 
             if matched:
+                # Found in car_models_FULL.json → use the file's canonical form
                 result['model'] = matched
+
+            elif _is_short_or_numeric(clean):
+                # Step 4b (ROADMAP §6): NOT in file AND short code / has digit
+                # → keep as ENGLISH CAPITALS (e.g. X5, GLE, C63, K5).
+                # Only reached when the file has no matching entry at all.
+                result['model'] = clean.upper()
+
             else:
-                # No fuzzy match — record for review and keep raw
+                # NOT in file AND full word → record for manual review, keep raw
                 _record_unknown('model', clean)
                 result['model'] = clean
 

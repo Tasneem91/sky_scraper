@@ -1,0 +1,27 @@
+# Large binary image folders — do not commit
+images/
+watermark_demo_output/
+watermark_demo_output_v2/
+watermark_demo_damazzle/
+
+# Google credentials and OAuth tokens — NEVER commit
+oauth_token.json
+client_secret*.json
+*-????????????????????????????????.json
+carsscraper-*.json
+imageuploader-*.json
+
+# Generated output files
+sayarti_import.csv
+damazzle_progress.json
+syriacars_test_progress.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.env
+.env.local
+
+# Windows
+Thumbs.db

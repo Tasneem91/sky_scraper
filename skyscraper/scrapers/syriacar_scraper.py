@@ -1,6 +1,23 @@
 """
-SyriaCar.net Scraper - Car listings website scraper
-Inherits from CarsScraper base class
+SyriaCar.net Scraper — Two-Stage Architecture
+  Stage 1: Selenium — iterates every LOCATION FILTER and infinite-scrolls
+            within each one to reach all ~8 900 cars.
+            (The homepage caps at ~180 most-recent listings; location filters
+             expose the full catalogue.)
+  Stage 2: requests + BeautifulSoup — fetch each detail page for extra fields.
+
+Location filter mechanism (confirmed via live DOM inspection):
+  • <ul class="ul-scroll"> inside <div id="sidebarlocation">
+  • Each <li data-governorate-id="N"> is a clickable location
+  • Empty data-governorate-id  ("")  = "All Regions" — skip it
+  • After clicking, the listing reloads with only that location's cars
+  • Same infinite-scroll mechanism as the homepage applies within each filter
+
+Scroll strategy:
+  • Signal: NUMBER OF CAR CARDS (not page height).
+  • Fires window.scrollTo + documentElement.scrollTop + scrollBy together.
+  • Patience: STABLE_LIMIT consecutive scrolls with no new cards → done.
+  • Confirmed timing: new batch every ~3 scrolls at 3 s each.
 """
 
 import logging
@@ -9,12 +26,11 @@ import time
 from pathlib import Path
 from urllib.parse import urljoin
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Set
 
 import requests
 from bs4 import BeautifulSoup
 from selenium import webdriver
-from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 
@@ -23,275 +39,294 @@ from scrapers import parser as car_parser
 
 logger = logging.getLogger(__name__)
 
+REQUEST_HEADERS = {
+    'User-Agent': (
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+        'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    ),
+    'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8',
+}
+
+# Stop scrolling after this many consecutive stable-count scrolls
+STABLE_LIMIT   = 8
+# Seconds to wait after each scroll (3 s confirmed sufficient by live test)
+SCROLL_WAIT    = 3
+# Hard cap per location (safety valve; 600 × 3 s = 30 min per location max)
+MAX_SCROLLS    = 600
+
 
 class SyriaCarScraper(CarsScraper):
     """
-    SyriaCar.net car listings scraper
-    Handles scraping and data extraction from syriacar.net
+    SyriaCar.net two-stage scraper.
+    Stage 1 uses Selenium (location-filter + infinite-scroll per location).
+    Stage 2 uses requests (SSR detail pages, no browser needed).
     """
 
     def __init__(self, website_config: Dict[str, Any]):
-        """
-        Initialize the SyriaCar scraper
-
-        Args:
-            website_config: Website configuration dictionary
-        """
         super().__init__(website_config)
-
-        # SyriaCar-specific configuration
-        self.base_url = website_config.get('url', 'https://syriacar.net')
+        self.base_url    = website_config.get('url', 'https://syriacar.net')
         self.image_folder = Path(website_config.get('image_folder', 'images/syriacar'))
         self.image_folder.mkdir(parents=True, exist_ok=True)
-
-        self.driver = None
+        self.driver  = None
         self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        })
-
+        self.session.headers.update(REQUEST_HEADERS)
         logger.info(f"Initialized SyriaCarScraper for {self.website_name}")
+
+    # =========================================================================
+    # Driver lifecycle (Stage 1 only)
+    # =========================================================================
+
+    def _init_driver(self):
+        opts = webdriver.ChromeOptions()
+        opts.add_argument("--headless=new")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--disable-gpu")
+        opts.add_argument("--window-size=1920,1080")
+        opts.add_argument(f"--user-agent={REQUEST_HEADERS['User-Agent']}")
+
+        chromedriver = os.path.expanduser(
+            "~/.wdm/drivers/chromedriver/win64/147.0.7727.57/"
+            "chromedriver-win32/chromedriver.exe"
+        )
+        if os.path.exists(chromedriver):
+            self.driver = webdriver.Chrome(service=Service(chromedriver), options=opts)
+        else:
+            self.driver = webdriver.Chrome(
+                service=Service(ChromeDriverManager().install()), options=opts
+            )
+        logger.info("Selenium WebDriver initialized (headless:new, 1920×1080)")
+
+    def _close_driver(self):
+        if self.driver:
+            try:
+                self.driver.quit()
+            except Exception:
+                pass
+            self.driver = None
+            logger.info("WebDriver closed")
+
+    # =========================================================================
+    # Location filter helpers
+    # =========================================================================
+
+    def _get_location_filters(self) -> List[Dict]:
+        """
+        Extract all location filter <li> elements from #sidebarlocation.
+        Returns list of {governorate_id, name, count}, sorted by count DESC.
+        Skips the "All Regions" entry (empty data-governorate-id).
+        """
+        locations = self.driver.execute_script("""
+            return Array.from(
+                document.querySelectorAll('#sidebarlocation li[data-governorate-id]')
+            )
+            .filter(li => li.getAttribute('data-governorate-id') !== '')
+            .map(li => ({
+                governorate_id: li.getAttribute('data-governorate-id'),
+                name:  (li.querySelector('.span-governorate-name') || li).textContent.trim(),
+                count: parseInt(
+                    (li.querySelector('.span-number-of-cars') || {textContent:'0'}).textContent.trim()
+                ) || 0
+            }))
+            .filter(l => l.count > 0)
+            .sort((a,b) => b.count - a.count);
+        """)
+        return locations or []
+
+    def _click_location(self, governorate_id: str):
+        """Click a location filter <li> and wait for the listing to reload."""
+        self.driver.execute_script(
+            "document.querySelector("
+            f"'#sidebarlocation li[data-governorate-id=\"{governorate_id}\"]'"
+            ").click();"
+        )
+        time.sleep(4)   # let React/JS re-render the filtered list
+
+    # =========================================================================
+    # Scroll helper
+    # =========================================================================
+
+    def _scroll_all_cars(self, location_label: str = "") -> int:
+        """
+        Scroll the current page until no new car-card elements appear for
+        STABLE_LIMIT consecutive scroll attempts.
+
+        Starts counting from whatever is already in the DOM (so clicking a
+        location filter that pre-populates 40 cards won't mislead the counter).
+
+        Returns the final car count.
+        """
+        # Prime with the current count so we don't falsely tick stable_runs
+        prev_count  = self.driver.execute_script(
+            "return document.querySelectorAll('div.car-card').length;"
+        )
+        stable_runs = 0
+        scroll_num  = 0
+
+        while scroll_num < MAX_SCROLLS:
+            self.driver.execute_script("""
+                window.scrollTo(0, document.body.scrollHeight);
+                document.documentElement.scrollTop =
+                    document.documentElement.scrollHeight;
+                window.scrollBy(0, window.innerHeight);
+            """)
+            time.sleep(SCROLL_WAIT)
+            scroll_num += 1
+
+            current_count = self.driver.execute_script(
+                "return document.querySelectorAll('div.car-card').length;"
+            )
+
+            if current_count == prev_count:
+                stable_runs += 1
+                if stable_runs >= STABLE_LIMIT:
+                    logger.info(
+                        f"[Stage 1] [{location_label}] End of list — "
+                        f"{current_count} cards in {scroll_num} scrolls"
+                    )
+                    break
+            else:
+                logger.info(
+                    f"[Stage 1] [{location_label}] Scroll {scroll_num}: "
+                    f"{current_count} cards (was {prev_count})"
+                )
+                stable_runs = 0
+                prev_count  = current_count
+
+        return prev_count
+
+    # =========================================================================
+    # STAGE 1 — Collect raw card dicts via location-filter + infinite scroll
+    # =========================================================================
 
     def scrape(self) -> List[Dict]:
         """
-        Main scraping method - scrapes all cars from syriacar.net
-
-        Returns:
-            List of car dictionaries with all extracted data
+        Stage 1: for every location filter → click → scroll → collect cards.
+        Stage 2: requests → visit each detail page, merge fields, parse to 25 cols.
         """
-        cars = []
+        raw_cards: List[Dict] = []
+        seen_urls: Set[str]   = set()   # deduplication by ad URL
 
+        # ── Stage 1 ──────────────────────────────────────────────────────────
         try:
             self._init_driver()
-
-            logger.info(f"Scraping {self.base_url}")
+            logger.info(f"[Stage 1] Loading: {self.base_url}")
             self.driver.get(self.base_url)
+            time.sleep(5)
 
-            # Wait for JavaScript to render content
-            logger.info("Waiting for JavaScript to render content...")
-            time.sleep(3)
+            # Extract all location filters
+            locations = self._get_location_filters()
+            if not locations:
+                logger.warning("[Stage 1] No location filters found — falling back to homepage scroll")
+                locations = [{'governorate_id': None, 'name': 'homepage', 'count': 9999}]
 
-            # Load all cars with infinite scroll
-            logger.info("Loading all cars with infinite scroll...")
-            cars_before_scroll = 0
-            last_height = 0
-            scroll_count = 0
-            max_scrolls = 50
-            no_new_cars_count = 0
+            logger.info(
+                f"[Stage 1] Found {len(locations)} locations, "
+                f"total expected cars: {sum(l['count'] for l in locations)}"
+            )
 
-            while scroll_count < max_scrolls:
-                # Get current page height
-                new_height = self.driver.execute_script("return document.body.scrollHeight")
+            for loc in locations:
+                gov_id = loc['governorate_id']
+                label  = loc['name']
+                expected = loc['count']
+                logger.info(f"[Stage 1] === Location: {label} ({expected} cars) ===")
 
-                if new_height == last_height:
-                    no_new_cars_count += 1
-                    logger.info(f"No new content after scroll {scroll_count} (attempt {no_new_cars_count}/3)")
-                    if no_new_cars_count >= 3:
-                        logger.info("Reached end of list - no more cars to load")
-                        break
-                else:
-                    no_new_cars_count = 0
+                # Navigate to homepage fresh for each location
+                self.driver.get(self.base_url)
+                time.sleep(5)
 
-                # Scroll down
-                self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                last_height = new_height
-
-                # Wait for content to load
-                time.sleep(2)
-                scroll_count += 1
-
-                logger.info(f"Scroll {scroll_count}: Page height = {new_height}")
-
-            logger.info(f"Scrolling complete after {scroll_count} scrolls")
-
-            # Scroll back to top
-            self.driver.execute_script("window.scrollTo(0, 0);")
-            time.sleep(1)
-
-            # Parse page with BeautifulSoup
-            soup = BeautifulSoup(self.driver.page_source, 'html.parser')
-
-            # Find all car card elements
-            car_items = soup.find_all('div', class_='car-card')
-
-            if not car_items:
-                logger.warning("No car items found with selector 'div.car-card'")
-                logger.warning("Trying alternative selectors...")
-
-                possible_selectors = [
-                    ('div.car-item', 'div', 'car-item'),
-                    ('div.listing', 'div', 'listing'),
-                    ('article.car', 'article', 'car'),
-                ]
-
-                for selector in possible_selectors:
+                # Click location filter (unless we're doing the homepage fallback)
+                if gov_id:
                     try:
-                        if selector[1]:
-                            if selector[2]:
-                                car_items = soup.find_all(selector[1], class_=selector[2])
-                            else:
-                                car_items = soup.find_all(selector[1])
-
-                        if car_items and len(car_items) > 0:
-                            logger.info(f"Found {len(car_items)} items using selector: {selector[0]}")
-                            break
-                    except:
+                        self._click_location(gov_id)
+                    except Exception as e:
+                        logger.warning(f"[Stage 1] Could not click {label}: {e} — skipping")
                         continue
 
-            if not car_items:
-                logger.warning("No car items found with any selector!")
-                return []
+                # Scroll until end
+                final_count = self._scroll_all_cars(label)
 
-            logger.info(f"Found {len(car_items)} car listings")
+                # Parse full DOM
+                soup      = BeautifulSoup(self.driver.page_source, 'html.parser')
+                car_items = soup.find_all('div', class_='car-card')
 
-            # Extract data from each car item
-            for idx, item in enumerate(car_items, 1):
-                try:
-                    car_data = self._extract_car_data(item, idx)
-                    if car_data:
-                        cars.append(car_data)
+                # Extract unique raw cards
+                new_this_loc = 0
+                for idx, item in enumerate(car_items):
+                    try:
+                        raw = self._extract_raw(item, len(raw_cards) + idx + 1)
+                        if not raw:
+                            continue
+                        url = raw.get('ad_url') or raw.get('id')
+                        if url and url not in seen_urls:
+                            seen_urls.add(url)
+                            raw_cards.append(raw)
+                            new_this_loc += 1
+                    except Exception as e:
+                        logger.warning(f"[Stage 1] Card extract error: {e}")
 
-                        # Download image if available
-                        image_url = item.find('img', class_='car-image')
-                        if image_url:
-                            img_src = image_url.get('src') or image_url.get('data-src')
-                            if img_src:
-                                image_path = self.download_image(img_src, car_data.get('id'))
-                                if image_path:
-                                    car_data['image_path'] = image_path
-
-                except Exception as e:
-                    logger.warning(f"Error extracting data from car item {idx}: {e}")
-                    continue
-
-            logger.info(f"Successfully scraped {len(cars)} cars from syriacar.net")
-
-            # Log scraping result
-            self.log_scrape_result({
-                'total_items': len(cars),
-                'new_items': len(cars),
-                'duplicates': 0,
-                'duration': f"{scroll_count * 2} seconds"
-            })
-
-            return cars
+                logger.info(
+                    f"[Stage 1] {label}: {new_this_loc} new unique cards "
+                    f"| total so far: {len(raw_cards)}"
+                )
 
         except Exception as e:
-            logger.error(f"Error during scraping: {e}", exc_info=True)
-            return []
-
+            logger.error(f"[Stage 1] Fatal error: {e}", exc_info=True)
         finally:
             self._close_driver()
 
-    def _init_driver(self):
-        """Initialize Selenium WebDriver"""
-        try:
-            options = webdriver.ChromeOptions()
-            options.add_argument("--no-sandbox")
-            options.add_argument("--disable-dev-shm-usage")
-            options.add_argument("--disable-gpu")
+        logger.info(f"[Stage 1] Complete — {len(raw_cards)} unique raw cards collected")
 
-            # Try to use local ChromeDriver first
-            chromedriver_path = os.path.expanduser(
-                "~/.wdm/drivers/chromedriver/win64/147.0.7727.57/chromedriver-win32/chromedriver.exe"
-            )
+        # ── Stage 2 ──────────────────────────────────────────────────────────
+        logger.info(f"[Stage 2] Fetching detail pages for {len(raw_cards)} cars...")
+        cars:  List[Dict] = []
+        total = len(raw_cards)
 
-            if os.path.exists(chromedriver_path):
-                logger.info(f"Using ChromeDriver from: {chromedriver_path}")
-                self.driver = webdriver.Chrome(
-                    service=Service(chromedriver_path),
-                    options=options
-                )
-            else:
-                logger.info("Using ChromeDriver from webdriver-manager")
-                self.driver = webdriver.Chrome(
-                    service=Service(ChromeDriverManager().install()),
-                    options=options
-                )
+        for idx, raw in enumerate(raw_cards, 1):
+            ad_url = raw.get('ad_url')
+            if ad_url:
+                try:
+                    logger.info(f"[Stage 2] {idx}/{total}: {ad_url}")
+                    resp = self.session.get(ad_url, timeout=20)
+                    resp.raise_for_status()
+                    detail_soup = BeautifulSoup(resp.text, 'html.parser')
+                    detail = car_parser.extract_detail_from_soup(detail_soup)
+                    raw    = car_parser.merge_detail(raw, detail)
+                except Exception as e:
+                    logger.warning(f"[Stage 2] Failed {ad_url}: {e}")
 
-            logger.info("WebDriver initialized successfully")
+            try:
+                item = car_parser.parse(raw)
+                if item:
+                    cars.append(item)
+            except Exception as e:
+                logger.error(f"[Stage 2] Parse error card {idx}: {e}")
 
-        except Exception as e:
-            logger.error(f"Failed to initialize WebDriver: {e}")
-            raise
+            time.sleep(0.3)
 
-    def _close_driver(self):
-        """Close Selenium WebDriver"""
-        if self.driver:
-            self.driver.quit()
-            logger.info("WebDriver closed")
+        logger.info(f"[Stage 2] Complete — {len(cars)} cars parsed")
+        self.log_scrape_result({
+            'total_items': len(cars),
+            'new_items':   len(cars),
+            'duplicates':  0,
+            'duration':    f"{total * 0.3:.0f}s detail",
+        })
+        return cars
 
-    def download_image(self, image_url: str, car_id: str) -> str:
-        """
-        Download image and save it locally
+    # =========================================================================
+    # Stage 1 extraction helpers
+    # =========================================================================
 
-        Args:
-            image_url: URL of the image
-            car_id: ID of the car for naming
-
-        Returns:
-            Local path to saved image or None if failed
-        """
-        try:
-            if not image_url:
-                return None
-
-            # Make absolute URL if relative
-            if image_url.startswith('/'):
-                image_url = urljoin(self.base_url, image_url)
-            elif not image_url.startswith('http'):
-                image_url = urljoin(self.base_url, image_url)
-
-            response = self.session.get(image_url, timeout=10)
-            response.raise_for_status()
-
-            # Determine file extension
-            ext = '.jpg'
-            content_type = response.headers.get('content-type', '')
-            if 'png' in content_type:
-                ext = '.png'
-            elif 'webp' in content_type:
-                ext = '.webp'
-
-            # Save image
-            filename = f"car_{car_id}{ext}"
-            filepath = self.image_folder / filename
-
-            with open(filepath, 'wb') as f:
-                f.write(response.content)
-
-            logger.info(f"Downloaded image for car {car_id}: {filename}")
-            return str(filepath)
-
-        except Exception as e:
-            logger.warning(f"Failed to download image from {image_url}: {e}")
-            return None
-
-    def _extract_car_data(self, item, index: int) -> Dict[str, Any]:
-        """
-        Stage 1 (raw) + Stage 2 (parse) for a single car card.
-        Raw extraction is dumb — just collect text as-is.
-        Interpretation is delegated to car_parser.parse().
-        """
-        try:
-            raw = self._extract_raw(item, index)
-            if not raw:
-                return None
-            return car_parser.parse(raw)
-        except Exception as e:
-            logger.error(f"Error extracting car data: {e}", exc_info=True)
-            return None
-
-    def _extract_raw(self, item, index: int) -> Dict[str, Any]:
+    def _extract_raw(self, item, index: int) -> Optional[Dict[str, Any]]:
         """
         STAGE 1 — Raw extraction only. No interpretation.
         Collects exactly what is on the card — labels and values as-is.
         """
         raw = {
-            'source':      self.website_id,
-            'id':          f"{self.website_id}_{index}_{int(time.time())}",
-            'scraped_at':  datetime.now().isoformat(),
-            'listing_type': 'sell',
+            'source':          self.website_id or 'syriacar',
+            'id':              f"{self.website_id or 'syriacar'}_{index}_{int(time.time())}",
+            'scraped_at':      datetime.now().isoformat(),
+            'listing_type':    'sell',
             'title_raw':       None,
             'price_raw':       None,
             'location_raw':    None,
@@ -304,7 +339,7 @@ class SyriaCarScraper(CarsScraper):
             'seller_raw':      None,
         }
 
-        # Link
+        # Link — prefer share-button data-link, fallback to <a href>
         share_button = item.find('button', class_='share-button')
         if share_button and share_button.get('data-link'):
             raw['ad_url'] = share_button['data-link']
@@ -312,7 +347,9 @@ class SyriaCarScraper(CarsScraper):
             link_elem = item.find('a')
             if link_elem and link_elem.get('href'):
                 href = link_elem['href']
-                raw['ad_url'] = urljoin(self.base_url, href) if href.startswith('/') else href
+                raw['ad_url'] = (
+                    urljoin(self.base_url, href) if href.startswith('/') else href
+                )
 
         # Images
         raw['images'] = self._extract_all_images(item)
@@ -320,28 +357,28 @@ class SyriaCarScraper(CarsScraper):
         # card-info section
         card_info = item.find('div', class_='card-info')
         if card_info:
-            # Full card text → description_raw
             raw['description_raw'] = card_info.get_text(separator=' ', strip=True)
 
-            # Title: h1.car-title = brand name (e.g. "كيا Kia")
+            # h1.car-title = brand (e.g. "كيا Kia")
             title_elem = card_info.find('h1', class_='car-title')
             if title_elem:
                 raw['title_raw'] = title_elem.get_text(strip=True)
 
-            # Subtitle: "Sportage • إس يو في • 2017" → model, body_type, year
+            # h2.car-sub-title = "Sportage • إس يو في • 2017"
             subtitle_elem = card_info.find('h2', class_='car-sub-title')
             if subtitle_elem:
-                parts = [p.strip() for p in subtitle_elem.get_text().split('•')]
-                parts = [p for p in parts if p]
+                parts = [p.strip() for p in subtitle_elem.get_text().split('•') if p.strip()]
                 specs = raw['specs_raw']
                 if len(parts) >= 1:
-                    specs['الموديل'] = parts[0]   # model name
+                    specs['الموديل']    = parts[0]
                 if len(parts) >= 2:
-                    specs['نوع الهيكل'] = parts[1]  # body type
+                    specs['نوع الهيكل'] = parts[1]
                 if len(parts) >= 3:
-                    specs['السنة'] = parts[2]       # year
+                    specs['السنة']      = parts[2]
 
-            # Features divs: mileage, location, fuel, origin, transmission, condition
+            # features-a: mileage / location
+            # features-b: fuel / origin
+            # features-c: transmission / condition
             features_div = card_info.find('div', class_='features')
             if features_div:
                 specs = raw['specs_raw']
@@ -360,7 +397,7 @@ class SyriaCarScraper(CarsScraper):
                     if len(divs) >= 1:
                         specs['نوع الوقود'] = divs[0].get_text(strip=True)
                     if len(divs) >= 2:
-                        specs['المصدر'] = divs[1].get_text(strip=True)
+                        specs['المصدر']     = divs[1].get_text(strip=True)
 
                 fc = features_div.find('div', class_='features-c')
                 if fc:
@@ -368,9 +405,9 @@ class SyriaCarScraper(CarsScraper):
                     if len(divs) >= 1:
                         specs['ناقل الحركة'] = divs[0].get_text(strip=True)
                     if len(divs) >= 2:
-                        specs['الحالة'] = divs[1].get_text(strip=True)
+                        specs['الحالة']      = divs[1].get_text(strip=True)
 
-        # Price button
+        # Price
         price_btn = item.find('button', class_='btn-contact-p')
         if price_btn:
             raw['price_raw'] = price_btn.get_text(strip=True)
@@ -378,48 +415,50 @@ class SyriaCarScraper(CarsScraper):
         return raw
 
     def _extract_all_images(self, item) -> List[str]:
-        """
-        Extract ALL image URLs from a car listing item
-        Handles cases with 0, 1, or multiple images
-
-        Args:
-            item: BeautifulSoup element for the car item
-
-        Returns:
-            List of image URLs
-        """
         images = []
         try:
-            # Find all img tags in the item
-            img_tags = item.find_all('img')
-
-            for img in img_tags:
-                # Get src or data-src (for lazy-loaded images)
+            for img in item.find_all('img'):
                 src = img.get('src') or img.get('data-src')
-
                 if src:
-                    # Convert relative URLs to absolute
                     if src.startswith('/'):
                         src = urljoin(self.base_url, src)
                     elif not src.startswith('http'):
                         src = urljoin(self.base_url, src)
-
                     images.append(src)
-
-            logger.debug(f"Extracted {len(images)} images from car listing")
-            return images
-
         except Exception as e:
-            logger.warning(f"Error extracting images: {e}")
-            return []
+            logger.warning(f"Image extract error: {e}")
+        return images
+
+    def download_image(self, image_url: str, car_id: str) -> Optional[str]:
+        """Download image locally (optional, kept for future use)."""
+        try:
+            if not image_url:
+                return None
+            if not image_url.startswith('http'):
+                image_url = urljoin(self.base_url, image_url)
+            r = self.session.get(image_url, timeout=10)
+            r.raise_for_status()
+            ext = '.jpg'
+            ct  = r.headers.get('content-type', '')
+            if 'png'  in ct: ext = '.png'
+            elif 'webp' in ct: ext = '.webp'
+            fp = self.image_folder / f"car_{car_id}{ext}"
+            fp.write_bytes(r.content)
+            return str(fp)
+        except Exception as e:
+            logger.warning(f"Image download failed {image_url}: {e}")
+            return None
+
+    # =========================================================================
+    # Statistics
+    # =========================================================================
 
     def get_statistics(self, items: List[Dict]) -> Dict[str, Any]:
-        """Calculate statistics from scraped items."""
         if not items:
             return {'total_items': 0, 'price_stats': {}, 'year_stats': {}, 'brand_stats': {}}
 
         prices = [i.get('price') for i in items if isinstance(i.get('price'), (int, float))]
-        years  = [i.get('year')  for i in items if isinstance(i.get('year'), int)]
+        years  = [i.get('year')  for i in items if isinstance(i.get('year'),  int)]
         brands = [i.get('brand') for i in items if i.get('brand')]
 
         return {

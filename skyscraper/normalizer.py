@@ -557,6 +557,35 @@ _MODEL_ALIASES = {
     'matiz':              'ماتيز',
     'kalos':              'كالوس',
     'leganza':            'ليجانزا',
+
+    # ── BYD (بي واي دي) ───────────────────────────────────────────────────────
+    # Arabic models in car_models_FULL.json — cross-script fuzzy matching
+    # can't reach them from English input, so we map explicitly.
+    # Arabic names verified directly from car_models_FULL.json.
+    'qin plus':           'كين بلس',
+    'han':                'هان',
+    'tang':               'تانغ',
+    'song plus':          'سونغ بلس',
+    'dolphin':            'دولفين',
+    'seal':               'سيل',
+    'seal 05':            'سيل05',
+    'seagull':            'سيجل',
+    'shark':              'شارك',
+    'destroyer':          'دستروير',       # ← دستروير (not ديستروير)
+    'destroyer 05':       'دستروير 05',
+    'yuan plus':          'يان بلس',       # ← يان (not يوان)
+    'freegate 07':        'فريغات 07',
+
+    # ── Chery (شيري) ─────────────────────────────────────────────────────────
+    # File only has one generic entry: تيغو (no numbered variants)
+    'tiggo':              'تيغو',
+
+    # ── Haval (هافال) ─────────────────────────────────────────────────────────
+    # English codes (H6, H9…) are already English in the file → fuzzy finds them.
+    # Only Arabic models need aliases.
+    'jolion':             'جوليون',
+    'bigdog':             'بيغ دوغ',
+    'big dog':            'بيغ دوغ',
 }
 
 # Brand name prefixes to strip from model strings (e.g. "Toyota Rav4" → "Rav4")

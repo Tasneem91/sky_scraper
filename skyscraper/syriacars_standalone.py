@@ -69,6 +69,7 @@ from google.oauth2 import credentials as google_creds_module
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
+from normalizer import normalize_car
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -960,6 +961,9 @@ class SyriaCarsScraper:
 
         detail['images']           = ', '.join(image_links)
         detail['image_folder_url'] = folder_url
+
+        # Normalize fields to Sayarti canonical values
+        detail = normalize_car(detail)
 
         try:
             self._append_row(detail)

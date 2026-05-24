@@ -681,6 +681,44 @@ class DamazzleScraper:
             logger.warning(f'  detail images fetch failed for {slug!r}: {exc}')
             return []
 
+    # ── Repair-data mode ─────────────────────────────────────────────────────
+
+    def repair_data(self):
+        """Normalize all existing sheet rows using Sayarti canonical values."""
+        logger.info('=== Repair-data mode (normalize all fields) ===')
+        NORMALIZABLE = [
+            'price', 'engine_size', 'mileage', 'year', 'seats', 'horsepower',
+            'cylinders', 'doors', 'fuel_type', 'transmission', 'origin',
+            'body_type', 'city', 'exterior_color', 'interior_color', 'condition',
+            'make', 'model',
+        ]
+        all_values = self.sheet.get_all_values()
+        if not all_values:
+            logger.info('Sheet is empty — nothing to repair.')
+            return
+        header = all_values[0]
+        fixed = 0
+        for row_num, row in enumerate(all_values[1:], start=2):
+            raw = {header[i]: row[i] if i < len(row) else '' for i in range(len(header))}
+            car_id = raw.get('id', str(row_num))
+            normalized = normalize_car(raw)
+            updates = {}
+            for col in NORMALIZABLE:
+                old = raw.get(col, '')
+                new = normalized.get(col, '')
+                if new and new != old:
+                    updates[col] = new
+            if updates:
+                for col, new_val in updates.items():
+                    try:
+                        col_idx = header.index(col) + 1
+                        self.sheet.update_cell(row_num, col_idx, new_val)
+                    except ValueError:
+                        pass
+                fixed += 1
+                logger.info(f'  [{car_id}] updated: {list(updates.keys())}')
+        logger.info(f'Repair complete — {fixed} rows updated.')
+
     # ── Repair-images mode ────────────────────────────────────────────────────
 
     def _repair_images(self):
@@ -1168,6 +1206,8 @@ examples:
                             'images_original_links (no browser needed); falls back '
                             'to the detail API via car_url slug. Does not scrape new listings.'
                         ))
+    parser.add_argument('--repair-data', action='store_true',
+                        help='Normalize all existing sheet rows to Sayarti canonical values.')
     args = parser.parse_args()
 
     if sys.stdout.encoding != 'utf-8':
@@ -1180,5 +1220,7 @@ examples:
     scraper = DamazzleScraper(full_mode=args.full, max_hours=args.hours)
     if args.repair_images:
         scraper._repair_images()
+    elif args.repair_data:
+        scraper.repair_data()
     else:
         scraper.run()

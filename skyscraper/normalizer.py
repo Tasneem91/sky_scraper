@@ -25,7 +25,7 @@ from typing import Optional
 # ── Load sayarti.json ─────────────────────────────────────────────────────────
 
 _SAYARTI_PATH    = Path(__file__).parent / 'sayarti.json'
-_CAR_MODELS_PATH = Path(r'C:\Users\Tasnaim\Downloads\car_models_FULL.json')
+_CAR_MODELS_PATH = Path(r'C:\Users\alkha\OneDrive\Desktop\SKYSCRAPER\sky_scraper\skyscraper\car_models_FULL.json')
 
 # Keys to skip — not real brands
 _SKIP_BRANDS = {'ماركة', 'Not set'}

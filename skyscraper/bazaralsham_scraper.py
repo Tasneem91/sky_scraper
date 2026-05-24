@@ -84,6 +84,7 @@ COLUMNS = [
     'phone', 'listing_id',
     'seller_name', 'seller_type', 'seller_listings',
     'description_original',
+    'features', 'safety_features',
     'images_original_links', 'images_drive_links',
 ]
 
@@ -293,6 +294,88 @@ def _spec_pairs(soup: BeautifulSoup, container_class: str) -> dict:
     return dict(zip(labels, values))
 
 
+# Keywords that identify a safety-feature section (Arabic + English)
+_SAFETY_KEYWORDS = ['أمان', 'سلامة', 'safety']
+# Keywords that identify any generic feature/specs section
+_FEATURE_KEYWORDS = ['مواصفات', 'ميزات', 'المواصفات', 'الخارجية', 'الراحة', 'التقنية']
+
+
+def _extract_features(soup: BeautifulSoup) -> tuple:
+    """
+    Extract feature lists from bazaralsham/syriacar.net detail pages.
+    Looks for accordion sections beyond the two main spec-pair columns
+    (box-accordion-1-right / box-accordion-1-left).
+
+    Returns (features_str, safety_features_str) where items are pipe-separated:
+        "فتحة سقف|مقاعد جلد|نظام ملاحة"
+
+    If the site doesn't have separate feature sections the strings are empty.
+    """
+    features: list = []
+    safety_features: list = []
+
+    # ── Method 1: accordion divs (box-accordion-2, box-accordion-3, …) ────────
+    for section in soup.select('div[class*="box-accordion"]'):
+        classes = ' '.join(section.get('class', []))
+        if 'box-accordion-1' in classes:
+            continue  # already handled as label:value spec pairs
+
+        items = [li.get_text(strip=True) for li in section.select('li')
+                 if li.get_text(strip=True)]
+        if not items:
+            continue
+
+        # Determine category from a nearby heading
+        heading_el = (
+            section.select_one('h2, h3, h4, .section-header, .accordion-header')
+            or section.find_previous_sibling(['h2', 'h3', 'h4'])
+        )
+        heading_text = heading_el.get_text(strip=True) if heading_el else ''
+
+        if any(kw in heading_text for kw in _SAFETY_KEYWORDS):
+            safety_features.extend(items)
+        else:
+            features.extend(items)
+
+    # ── Method 2: headings + following UL (fallback for flat page layouts) ────
+    if not features and not safety_features:
+        for header in soup.find_all(['h2', 'h3', 'h4', 'p', 'span'], string=True):
+            text = header.get_text(strip=True)
+            if not text:
+                continue
+            is_safety   = any(kw in text for kw in _SAFETY_KEYWORDS)
+            is_features = any(kw in text for kw in _FEATURE_KEYWORDS)
+            if not (is_safety or is_features):
+                continue
+
+            # Grab the next UL (sibling or inside the next sibling)
+            nxt = header.find_next_sibling('ul')
+            if not nxt:
+                parent_nxt = header.parent.find_next_sibling()
+                if parent_nxt:
+                    nxt = parent_nxt.find('ul')
+
+            if nxt:
+                items = [li.get_text(strip=True) for li in nxt.select('li')
+                         if li.get_text(strip=True)]
+                if is_safety:
+                    safety_features.extend(items)
+                elif items:
+                    features.extend(items)
+
+    # Deduplicate while preserving insertion order
+    def _dedup(lst: list) -> list:
+        seen: set = set()
+        out: list = []
+        for x in lst:
+            if x not in seen:
+                seen.add(x)
+                out.append(x)
+        return out
+
+    return '|'.join(_dedup(features)), '|'.join(_dedup(safety_features))
+
+
 def scrape_detail(session: requests.Session, url: str) -> dict:
     """Scrape full detail page for a car."""
     data = {}
@@ -409,6 +492,11 @@ def scrape_detail(session: requests.Session, url: str) -> dict:
             m = re.search(r'(\d+)', seller_listings_el.get_text())
             data['seller_listings'] = m.group(1) if m else ''
 
+        # ── Feature lists (ROADMAP §8) ────────────────────────────────────────
+        feats, safety_feats = _extract_features(soup)
+        data['features']        = feats
+        data['safety_features'] = safety_feats
+
     except Exception as exc:
         logger.warning(f'  Detail scrape error ({url[-50:]}): {exc}')
 
@@ -457,7 +545,24 @@ class SheetManager:
 
     def _ensure_header(self):
         first = self.ws.row_values(1)
-        if first != COLUMNS:
+        if not first:
+            self.ws.insert_row(COLUMNS, 1)
+            return
+        if first == COLUMNS:
+            return
+        # Non-destructive path: existing header is a subset of COLUMNS
+        # (columns were added to COLUMNS but the sheet still has the old header).
+        existing = set(first)
+        new_cols = [c for c in COLUMNS if c not in existing]
+        if new_cols and all(c in COLUMNS for c in first):
+            next_col = len(first) + 1
+            for col_name in new_cols:
+                self.ws.update_cell(1, next_col, col_name)
+                next_col += 1
+            logger.info(f'Sheet header extended — added columns: {new_cols}')
+        else:
+            # Major schema mismatch (e.g. fresh sheet or corrupted header) — reset
+            logger.warning('Header mismatch — clearing sheet and rewriting header')
             self.ws.clear()
             self.ws.insert_row(COLUMNS, 1)
 

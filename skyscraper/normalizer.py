@@ -69,6 +69,45 @@ def _load_car_models():
 _load_car_models()
 
 
+# ── Unknown values tracking ───────────────────────────────────────────────────
+# Every time the normalizer can't match a value it falls back to the raw string.
+# Those raw strings are saved here so you can review and extend the alias maps.
+
+_UNKNOWN_FILE = Path(__file__).parent / 'unknown_values.json'
+_unknown: dict = {}
+
+
+def _load_unknown():
+    global _unknown
+    try:
+        if _UNKNOWN_FILE.exists():
+            with open(_UNKNOWN_FILE, encoding='utf-8') as f:
+                _unknown = json.load(f)
+    except Exception:
+        _unknown = {}
+
+
+_load_unknown()
+
+
+def _record_unknown(field: str, value: str) -> None:
+    """Append an unmatched value to unknown_values.json for periodic review."""
+    if not field or not value:
+        return
+    value = value.strip()
+    if not value:
+        return
+    if field not in _unknown:
+        _unknown[field] = []
+    if value not in _unknown[field]:
+        _unknown[field].append(value)
+        try:
+            with open(_UNKNOWN_FILE, 'w', encoding='utf-8') as f:
+                json.dump(_unknown, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+
 # ── Arabic text normalization helpers ─────────────────────────────────────────
 
 def _normalize_ar(text: str) -> str:
@@ -547,6 +586,22 @@ def _strip_lexus_variant(model: str) -> str:
     return m.group(1).upper() if m else model
 
 
+def _is_short_or_numeric(text: str) -> bool:
+    """
+    Returns True for model codes that must stay as ENGLISH CAPITALS and must NOT
+    be fuzzy-matched into Arabic names.
+
+    Rules (from ROADMAP §6):
+      • 3 characters or fewer  → e.g. IS, X5, GLE, C63 → too short to fuzzy-match
+      • Contains any digit     → e.g. C63, 330i, XT6, K5 — alphanumeric codes
+
+    Known named models (rio, golf, …) are handled earlier via _MODEL_ALIASES so
+    they never reach this function.
+    """
+    t = text.strip()
+    return len(t) <= 3 or bool(re.search(r'\d', t))
+
+
 def _apply_hard_map(raw: str, mapping: dict) -> Optional[str]:
     key = _normalize_ar(raw).lower()
     for k, v in mapping.items():
@@ -601,50 +656,86 @@ def normalize(field: str, raw) -> str:
         result = _apply_hard_map(raw, _FUEL_MAP)
         if result:
             return result
-        return _best_match(raw, _list_values('fuel_type')) or raw
+        matched = _best_match(raw, _list_values('fuel_type'))
+        if matched:
+            return matched
+        _record_unknown('fuel_type', raw)
+        return raw
 
     # ── Drive / steering ──────────────────────────────────────────────────────
     if field == 'drive_system':
         result = _apply_hard_map(raw, _DRIVE_MAP)
         if result:
             return result
-        return _best_match(raw, _list_values('drive_type')) or raw
+        matched = _best_match(raw, _list_values('drive_type'))
+        if matched:
+            return matched
+        _record_unknown('drive_system', raw)
+        return raw
 
     # ── Transmission ──────────────────────────────────────────────────────────
     if field == 'transmission':
         result = _apply_hard_map(raw, _TRANSMISSION_MAP)
         if result:
             return result
-        return _best_match(raw, _list_values('transmission')) or raw
+        matched = _best_match(raw, _list_values('transmission'))
+        if matched:
+            return matched
+        _record_unknown('transmission', raw)
+        return raw
 
     # ── Origin / imported ─────────────────────────────────────────────────────
     if field == 'origin':
         result = _apply_hard_map(raw, _ORIGIN_MAP)
         if result:
             return result
-        return _best_match(raw, _list_values('imported')) or raw
+        matched = _best_match(raw, _list_values('imported'))
+        if matched:
+            return matched
+        _record_unknown('origin', raw)
+        return raw
 
     # ── Body type ─────────────────────────────────────────────────────────────
     if field == 'body_type':
         result = _apply_hard_map(raw, _BODY_MAP)
         if result:
             return result
-        return _best_match(raw, _list_values('vehicle_type')) or raw
+        matched = _best_match(raw, _list_values('vehicle_type'))
+        if matched:
+            return matched
+        _record_unknown('body_type', raw)
+        return raw
 
     # ── City / location ───────────────────────────────────────────────────────
     if field == 'city':
-        return _best_match(raw, _list_values('location')) or raw
+        matched = _best_match(raw, _list_values('location'))
+        if matched:
+            return matched
+        _record_unknown('city', raw)
+        return raw
 
     # ── Colors ────────────────────────────────────────────────────────────────
     if field == 'exterior_color':
-        return _best_match(raw, _list_values('color')) or raw
+        matched = _best_match(raw, _list_values('color'))
+        if matched:
+            return matched
+        _record_unknown('exterior_color', raw)
+        return raw
 
     if field == 'interior_color':
-        return _best_match(raw, _list_values('interior_color')) or raw
+        matched = _best_match(raw, _list_values('interior_color'))
+        if matched:
+            return matched
+        _record_unknown('interior_color', raw)
+        return raw
 
     # ── Condition ─────────────────────────────────────────────────────────────
     if field == 'condition':
-        return _best_match(raw, _list_values('condition')) or raw
+        matched = _best_match(raw, _list_values('condition'))
+        if matched:
+            return matched
+        _record_unknown('condition', raw)
+        return raw
 
     # ── Make (brand) ──────────────────────────────────────────────────────────
     if field == 'make':
@@ -654,7 +745,11 @@ def normalize(field: str, raw) -> str:
         alias = _apply_hard_map(raw, _MAKE_MAP)
         if alias:
             return alias
-        return _best_match(raw, _all_brands) or raw
+        matched = _best_match(raw, _all_brands)
+        if matched:
+            return matched
+        _record_unknown('make', raw)
+        return raw
 
     # ── Model ─────────────────────────────────────────────────────────────────
     # Note: normalize_car() handles model separately (needs make context).
@@ -718,16 +813,31 @@ def normalize_car(car: dict) -> dict:
         alias_key = clean.strip().lower()
         norm_model = _MODEL_ALIASES.get(alias_key)
 
-        # Step 4: if no alias, use brand-context fuzzy matching
-        if norm_model is None:
+        if norm_model is not None:
+            # Known alias → use Arabic canonical name
+            result['model'] = norm_model
+
+        elif _is_short_or_numeric(clean):
+            # Step 3b (ROADMAP §6): short code or contains digits → keep as
+            # ENGLISH CAPITALS.  Fuzzy matching would corrupt "X5" → "اكس5",
+            # "GLE" → something Arabic, etc.
+            result['model'] = clean.upper()
+
+        else:
+            # Step 4: brand-context fuzzy matching (Arabic models only)
             brand_models = _car_models.get(norm_make, [])
             if brand_models:
-                norm_model = _best_match(clean, brand_models) or clean
+                matched = _best_match(clean, brand_models)
             else:
                 all_models = [m for models in _car_models.values() for m in models]
-                norm_model = _best_match(clean, all_models) or clean
+                matched = _best_match(clean, all_models)
 
-        result['model'] = norm_model
+            if matched:
+                result['model'] = matched
+            else:
+                # No fuzzy match — record for review and keep raw
+                _record_unknown('model', clean)
+                result['model'] = clean
 
     return result
 

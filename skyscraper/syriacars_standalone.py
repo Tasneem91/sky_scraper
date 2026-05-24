@@ -136,20 +136,20 @@ STOP_AFTER_FULL_PAGES = 2
 SPEC_MAP: Dict[str, str] = {
     # ─ Main spec list (ul.single-listing-data) ─
     'السنة':           'year',
-    'المدينة':         'location',
-    'الماركة':         'brand',
+    'المدينة':         'city',
+    'الماركة':         'make',
     'الموديل':         'model',
     'الحالة':          'condition',
     'الكيلومتراج':     'mileage',
     'نوع الجسم':       'body_type',
     'الوقود':          'fuel_type',
     'نوع الوقود':      'fuel_type',
-    'المحرك':          'engine',
+    'المحرك':          'engine_size',
     'الغيار':          'transmission',
     'ناقل الحركة':     'transmission',
     'الناقل':          'transmission',
     'الانتقال':        'transmission',
-    'اللون الخارجي':   'color',
+    'اللون الخارجي':   'exterior_color',
     'اللون الداخلي':   'interior_color',
     # ─ Extra / accordion / chapter sections ─
     'نظام الدفع':      'drive_system',
@@ -159,8 +159,8 @@ SPEC_MAP: Dict[str, str] = {
     'الأبواب':         'doors',
     'السلندرات':       'cylinders',
     'عدد السلندرات':   'cylinders',
-    'رقم الهيكل':      'vin',
-    'رقم الشاصي':      'vin',
+    'رقم الهيكل':      'chassis_number',
+    'رقم الشاصي':      'chassis_number',
     # ─ Ignored (prefixed _) ─
     'History':         '_history',
     'الوارد':          '_origin',
@@ -171,36 +171,18 @@ SPEC_MAP: Dict[str, str] = {
 # ── Sheet columns (order = column order in spreadsheet) ───────────────────────
 
 COLUMNS: List[str] = [
-    'scraped_at',
-    'date_added',        # listing posting date on syriacars.net (YYYY-MM-DD)
-    'source',
-    'id',
-    'category',
-    'ad_title',          # left blank — AI-generated later
-    'listing_type',      # للبيع / للإيجار
-    'condition',         # مستعمل / جديد
-    'body_type',
-    'brand',
-    'model',
-    'price',
-    'location',
-    'year',
-    'drive_system',
-    'transmission',
-    'fuel_type',
-    'mileage',
-    'engine',
-    'cylinders',
-    'color',
-    'interior_color',
-    'doors',
-    'vin',
-    'description',
-    'seller_name',
-    'contact',
-    'url',               # canonical detail page URL on syriacars.net
-    'images',            # comma-separated Google Drive file links
-    'image_folder_url',  # link to the per-car Drive sub-folder
+    'id', 'source', 'car_url',
+    'make', 'model', 'year', 'body_type',
+    'exterior_color', 'interior_color',
+    'fuel_type', 'engine_size', 'cylinders', 'horsepower',
+    'transmission', 'doors', 'seats', 'steering_side',
+    'origin', 'condition', 'chassis_condition', 'warranty', 'chassis_number',
+    'city', 'mileage', 'price',
+    'date_added', 'views',
+    'phone', 'listing_id',
+    'seller_name', 'seller_type', 'seller_listings',
+    'description_original',
+    'images_original_links', 'images_drive_links',
 ]
 
 # ── OAuth2 helpers ────────────────────────────────────────────────────────────
@@ -587,7 +569,7 @@ class SyriaCarsScraper:
             'id':         f'syriacars_{listing_id}',
             'category':   'cars',
             'ad_title':   '',
-            'url':        car_url,
+            'car_url':    car_url,
         }
 
         # ── Title ─────────────────────────────────────────────────────────────
@@ -690,7 +672,7 @@ class SyriaCarsScraper:
                     if nxt:
                         desc = _clean(nxt.get_text(separator=' '))
                         if desc:
-                            data['description'] = desc
+                            data['description_original'] = desc
                     break
 
         # ── Seller name ───────────────────────────────────────────────────────
@@ -710,7 +692,7 @@ class SyriaCarsScraper:
                 phone = tel_a['href'].replace('tel:', '').strip()
 
         if phone:
-            data['contact'] = phone
+            data['phone'] = phone
 
         # Append WhatsApp if it differs from the phone number
         wa_a = soup.select_one('a.single-listing-whatsapp-button[href*="wa.me"]')
@@ -718,9 +700,9 @@ class SyriaCarsScraper:
             wa_m = re.search(r'wa\.me/(\+?[\d]+)', wa_a['href'])
             if wa_m:
                 wa_num = wa_m.group(1)
-                existing_contact = data.get('contact', '')
-                if wa_num.lstrip('+') not in existing_contact.replace('+', '').replace(' ', ''):
-                    data['contact'] = (existing_contact + ' / WA:' + wa_num).strip(' /')
+                existing_phone = data.get('phone', '')
+                if wa_num.lstrip('+') not in existing_phone.replace('+', '').replace(' ', ''):
+                    data['phone'] = (existing_phone + ' / WA:' + wa_num).strip(' /')
 
         # ── Date added (from detail page) ─────────────────────────────────────
         # Primary: WordPress / Open Graph published-time meta tag
@@ -858,13 +840,12 @@ class SyriaCarsScraper:
         header = all_values[0]
 
         try:
-            id_col         = header.index('id')
-            images_col     = header.index('images')
-            img_folder_col = header.index('image_folder_url')
+            id_col     = header.index('id')
+            images_col = header.index('images_drive_links')
         except ValueError as exc:
             logger.error(f'Required column not found: {exc}')
             return
-        url_col = header.index('url') if 'url' in header else -1
+        url_col = header.index('car_url') if 'car_url' in header else -1
 
         # Collect rows that need repair
         to_repair = []
@@ -941,11 +922,10 @@ class SyriaCarsScraper:
                 time.sleep(REQUEST_DELAY)
                 continue
 
-            # Update ONLY the images + image_folder_url cells (leave all other data intact)
-            if image_links or folder_url:
+            # Update ONLY the images_drive_links cell (leave all other data intact)
+            if image_links:
                 try:
-                    self.sheet.update_cell(row_num, images_col + 1,     ', '.join(image_links))
-                    self.sheet.update_cell(row_num, img_folder_col + 1, folder_url)
+                    self.sheet.update_cell(row_num, images_col + 1, ', '.join(image_links))
                     # Also save the resolved URL if the column exists and was empty
                     if url_col >= 0 and not item['url'] and car_url:
                         self.sheet.update_cell(row_num, url_col + 1, car_url)
@@ -997,8 +977,7 @@ class SyriaCarsScraper:
             except Exception as exc:
                 logger.error(f'  Drive error for {listing_id}: {exc}')
 
-        detail['images']           = ', '.join(image_links)
-        detail['image_folder_url'] = folder_url
+        detail['images_drive_links'] = ', '.join(image_links)
 
         # Normalize fields to Sayarti canonical values
         detail = normalize_car(detail)

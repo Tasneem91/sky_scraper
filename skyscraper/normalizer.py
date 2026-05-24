@@ -581,11 +581,92 @@ _MODEL_ALIASES = {
     'tiggo':              'تيغو',
 
     # ── Haval (هافال) ─────────────────────────────────────────────────────────
-    # English codes (H6, H9…) are already English in the file → fuzzy finds them.
-    # Only Arabic models need aliases.
     'jolion':             'جوليون',
     'bigdog':             'بيغ دوغ',
     'big dog':            'بيغ دوغ',
+
+    # ── Jeep ──────────────────────────────────────────────────────────────────
+    'wrangler':           'رانجلر',
+    'gladiator':          'غلادييتر',
+    'grand cherokee':     'جراند شيروكي',
+    'cherokee':           'شيروكي',
+    'grand wagoneer':     'جراند واجونير',
+    'wagoneer':           'واجونير',
+    'renegade':           'رينيغارد',
+    'compass':            'كامبوس',
+    'avenger':            'افينجر',
+    'recon':              'ريكون',
+
+    # ── Ford ──────────────────────────────────────────────────────────────────
+    'explorer':           'إكسبلورر',
+    'expedition':         'إكسبيديشن',
+    'ecosport':           'إيكو سبورت',
+    'eco sport':          'إيكو سبورت',
+    'escape':             'اسكيب',
+    'edge':               'ايدج',
+    'bronco sport':       'برونكو سبورت',
+    'bronco':             'برونكو',
+    'transit connect':    'ترانزيت كونكت',
+    'transit':            'ترانزيت',
+    'ranger':             'رانجر',
+    'focus':              'فوكس',
+    'fiesta':             'فيستا',
+    'fusion':             'فيوجن',
+    'kuga':               'كوجا',
+    'maverick':           'ماڤيريك',
+    'mustang mach-e':     'موستانج ماخ إي',
+    'mustang mach e':     'موستانج ماخ إي',
+    'mustang':            'موستانج',
+    'mondeo':             'مونديو',
+
+    # ── Opel / Vauxhall ───────────────────────────────────────────────────────
+    'astra':              'أسترا',
+    'omega':              'أوميغا',
+    'insignia':           'انستيغيا',
+    'grandland':          'جراندلاند',
+    'crossland':          'كروسلاند',
+    'corsa':              'كورسا',
+    'mokka':              'موكا',
+    'vectra':             'فيكترا',
+    'vivaro':             'فيفارو',
+    'movano':             'موفانو',
+
+    # ── Renault ───────────────────────────────────────────────────────────────
+    'arkana':             'أركانا',
+    'austral':            'اوسترال',
+    'talisman':           'تاليسمان',
+    'traffic':            'ترافيك',
+    'trafic':             'ترافيك',
+    'zoe':                'زوي',
+    'symbol':             'سيمبول',
+    'fluence':            'فلوينس',
+    'captur':             'كابتور',
+    'capture':            'كابتشر',
+    'kangoo':             'كانجو',
+    'clio':               'كليو',
+    'koleos':             'كوليوس',
+    'master':             'ماستر',
+    'megane':             'ميجان',
+
+    # ── GMC ───────────────────────────────────────────────────────────────────
+    'acadia':             'أكاديا',
+    'terrain':            'تيريان',
+    'sierra':             'سييرا',
+    'canyon':             'كانيون',
+    'yukon':              'يوكون',
+
+    # ── Chrysler ──────────────────────────────────────────────────────────────
+    'pacifica':           'باسيفيكا',
+    'voyager':            'فوييجر',
+
+    # ── Geely ─────────────────────────────────────────────────────────────────
+    'atlas':              'أطلس',
+    'okavango':           'أوكافانغو',
+    'emgrand':            'إمجراند',
+    'preface':            'بريفايس',
+    'coolray':            'كولراي',
+    'tugella':            'توجيلا',
+    'azkarra':            'ازكارا',
 }
 
 # Brand name prefixes to strip from model strings (e.g. "Toyota Rav4" → "Rav4")
@@ -596,6 +677,54 @@ _BRAND_PREFIXES_TO_STRIP = [
     'subaru', 'suzuki', 'land rover', 'saipa', 'daewoo', 'chery',
     'infiniti', 'مرسيدس', 'تويوتا', 'هيونداي', 'كيا', 'نيسان',
 ]
+
+
+def _is_arabic(text: str) -> bool:
+    """Returns True if the string contains Arabic characters."""
+    return bool(re.search(r'[؀-ۿ]', text))
+
+
+# Latin → Arabic transliteration table (digraphs before single chars)
+_LATIN_TO_AR = [
+    ('ch', 'تش'), ('sh', 'ش'), ('th', 'ث'), ('ph', 'ف'),
+    ('gh', 'غ'), ('kh', 'خ'), ('ck', 'ك'), ('qu', 'كو'),
+    ('oo', 'و'),  ('ee', 'ي'),
+    ('a', 'ا'), ('b', 'ب'), ('c', 'ك'), ('d', 'د'),
+    ('e', ''),   ('f', 'ف'), ('g', 'ج'), ('h', 'ه'),
+    ('i', 'ي'), ('j', 'ج'), ('k', 'ك'), ('l', 'ل'),
+    ('m', 'م'), ('n', 'ن'), ('o', 'و'), ('p', 'ب'),
+    ('q', 'ك'), ('r', 'ر'), ('s', 'س'), ('t', 'ت'),
+    ('u', 'و'), ('v', 'ف'), ('w', 'و'), ('x', 'كس'),
+    ('y', 'ي'), ('z', 'ز'),
+]
+
+
+def _latin_to_arabic(text: str) -> str:
+    """
+    Rough Latin → Arabic transliteration for unknown car model names.
+    Not perfect, but produces readable Arabic text instead of leaving
+    the name in English.  Result is still recorded in unknown_values.json
+    so aliases can be added for models that need exact canonical names.
+    """
+    result = ''
+    low = text.strip().lower()
+    i = 0
+    while i < len(low):
+        ch = low[i]
+        if not ch.isalpha():
+            result += ch
+            i += 1
+            continue
+        matched = False
+        for latin, arabic in _LATIN_TO_AR:
+            if low[i:i + len(latin)] == latin:
+                result += arabic
+                i += len(latin)
+                matched = True
+                break
+        if not matched:
+            i += 1
+    return result.strip()
 
 
 def _strip_brand_prefix(model: str) -> str:
@@ -867,10 +996,18 @@ def normalize_car(car: dict) -> dict:
                 # Only reached when the file has no matching entry at all.
                 result['model'] = clean.upper()
 
-            else:
-                # NOT in file AND full word → record for manual review, keep raw
+            elif _is_arabic(clean):
+                # Already Arabic but no match in file → keep as-is
                 _record_unknown('model', clean)
                 result['model'] = clean
+
+            else:
+                # English full word not in file → transliterate to Arabic.
+                # Result is approximate; original is saved in unknown_values.json
+                # so the correct alias can be added later if needed.
+                ar = _latin_to_arabic(clean)
+                _record_unknown('model', clean)
+                result['model'] = ar if ar else clean
 
     return result
 

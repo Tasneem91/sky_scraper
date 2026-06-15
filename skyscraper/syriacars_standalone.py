@@ -895,6 +895,8 @@ class SyriaCarsScraper:
         for row_num, row in enumerate(all_values[1:], start=2):
             raw = {header[i]: row[i] if i < len(row) else '' for i in range(len(header))}
             car_id = raw.get('id', str(row_num))
+            # Snapshot originals before in-place strip so comparison uses sheet values
+            originals = {col: raw.get(col, '') for col in NORMALIZABLE}
             # Apply syriacars-specific preprocessing before normalization
             for _f in ('make', 'model', 'body_type', 'fuel_type', 'transmission',
                        'condition', 'city', 'origin', 'exterior_color', 'interior_color'):
@@ -903,7 +905,7 @@ class SyriaCarsScraper:
             normalized = normalize_car(raw)
             updates = {}
             for col in NORMALIZABLE:
-                old = raw.get(col, '')
+                old = originals.get(col, '')
                 new = normalized.get(col, '')
                 if new and new != old:
                     updates[col] = new

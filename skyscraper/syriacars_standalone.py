@@ -915,11 +915,39 @@ class SyriaCarsScraper:
         logger.info(f'Created dealers sheet: {sh.id}  →  {sh.url}')
         return ws
 
+    def _phones_from_cars_sheet(self) -> Dict[str, str]:
+        """
+        Read the cars sheet and return {seller_name_lower: phone} for every
+        row where seller_type == 'dealer'. Phones collected during normal
+        scraping are reused here so --scrape-dealers never needs extra HTTP calls.
+        """
+        phones: Dict[str, str] = {}
+        try:
+            all_vals = self.sheet.get_all_values()
+            if len(all_vals) < 2:
+                return phones
+            header = all_vals[0]
+            name_col  = header.index('seller_name')  if 'seller_name'  in header else -1
+            phone_col = header.index('phone')         if 'phone'         in header else -1
+            type_col  = header.index('seller_type')  if 'seller_type'  in header else -1
+            if -1 in (name_col, phone_col, type_col):
+                return phones
+            for row in all_vals[1:]:
+                stype = row[type_col] if type_col < len(row) else ''
+                name  = row[name_col]  if name_col  < len(row) else ''
+                phone = row[phone_col] if phone_col < len(row) else ''
+                if stype == 'dealer' and name and phone:
+                    phones[name.lower().strip()] = phone
+        except Exception as exc:
+            logger.warning(f'Could not read dealer phones from cars sheet: {exc}')
+        return phones
+
     def scrape_dealers(self):
         """
-        Scrape syriacars.net/dealers-list/ (all pages), enrich each dealer with
-        city and phone (fetched from one of their car listing pages), then write
-        all results to the SyriaCarsDealers Google Sheet.
+        Scrape syriacars.net/dealers-list/ (all pages) to get dealer names and
+        car counts. Phones come from the cars sheet (already collected during
+        normal scraping — no extra HTTP requests needed). Write results to the
+        SyriaCarsDealers Google Sheet (auto-created on first run).
         """
         logger.info('=== Dealer scraper ===')
         dealers: Dict[str, Dict] = {}   # username → info dict
@@ -943,13 +971,11 @@ class SyriaCarsScraper:
 
             # Each dealer has 3 flat <a href="/dealer/username/"> tags:
             # image link, name text link, car-count text link — no card wrapper class.
-            # Group them all by username, then pick name from the text-only link.
             all_dealer_links = soup.select('a[href*="/dealer/"]')
             if not all_dealer_links:
                 logger.info('  No /dealer/ links found — stopping.')
                 break
 
-            # Collect unique usernames first
             page_usernames: List[str] = []
             for a_tag in all_dealer_links:
                 href = a_tag.get('href', '').rstrip('/')
@@ -963,10 +989,8 @@ class SyriaCarsScraper:
 
             before = len(dealers)
             for username in page_usernames:
-                profile_url = f'{BASE_URL}/dealer/{username}/'
                 name      = ''
                 car_count = ''
-                # Inspect all anchors for this username to find name + car count
                 for a_tag in soup.select(f'a[href*="/dealer/{username}/"]'):
                     txt = _clean(a_tag.get_text())
                     if not txt:
@@ -976,12 +1000,12 @@ class SyriaCarsScraper:
                         if m:
                             car_count = m.group(0)
                     elif not name:
-                        name = txt   # first non-empty, non-car-count text = dealer name
+                        name = txt
 
                 dealers[username] = {
                     'dealer_name': name or username,
                     'username':    username,
-                    'profile_url': profile_url,
+                    'profile_url': f'{BASE_URL}/dealer/{username}/',
                     'phone':       '',
                     'city':        '',
                     'car_count':   car_count,
@@ -989,54 +1013,26 @@ class SyriaCarsScraper:
                 }
 
             added = len(dealers) - before
-            logger.info(f'  +{added} dealers  (total so far: {len(dealers)})')
+            logger.info(f'  +{added} dealers  (total: {len(dealers)})')
             if added == 0:
-                break   # no new cards — end of list
+                break
             page += 1
             time.sleep(REQUEST_DELAY)
 
-        logger.info(f'Dealer list done: {len(dealers)} dealers found.')
+        logger.info(f'Dealer list scraped: {len(dealers)} dealers.')
         if not dealers:
             logger.warning('No dealers found — aborting.')
             return
 
-        # ── Phase 2: enrich with city + phone via profile & car pages ────────
-        for i, (username, d) in enumerate(dealers.items(), 1):
-            logger.info(f'  [{i}/{len(dealers)}] {d["dealer_name"]}')
-            try:
-                prof_soup = self._fetch(d['profile_url'])
-
-                # City from "<h5>الموقع</h5>" sibling
-                for h in prof_soup.find_all(['h4', 'h5']):
-                    if 'الموقع' in h.get_text() or 'Location' in h.get_text(strip=True):
-                        city_el = h.find_next_sibling()
-                        if city_el:
-                            city = _clean(city_el.get_text())
-                            if city and city.lower() not in ('غير معروف', 'unknown'):
-                                d['city'] = city
-                        break
-
-                # Find any /car/<id>/ link on the dealer's profile page
-                car_a = next(
-                    (a for a in prof_soup.select('a[href*="/car/"]')
-                     if re.search(r'/car/\d+', a.get('href', ''))),
-                    None,
-                )
-                if car_a:
-                    time.sleep(REQUEST_DELAY)
-                    car_soup = self._fetch(car_a['href'])
-                    phone_span = car_soup.select_one('span.single-listing-phone-number')
-                    if phone_span:
-                        d['phone'] = _clean(phone_span.get_text())
-                    if not d['phone']:
-                        tel_a = car_soup.select_one(
-                            'a.single-listing-phone-button[href^="tel:"]'
-                        )
-                        if tel_a:
-                            d['phone'] = tel_a['href'].replace('tel:', '').strip()
-            except Exception as exc:
-                logger.warning(f'    Could not enrich {username}: {exc}')
-            time.sleep(REQUEST_DELAY)
+        # ── Phase 2: fill phones from cars sheet (zero extra HTTP requests) ──
+        phones = self._phones_from_cars_sheet()
+        matched = 0
+        for d in dealers.values():
+            phone = phones.get(d['dealer_name'].lower().strip(), '')
+            if phone:
+                d['phone'] = phone
+                matched += 1
+        logger.info(f'Phone lookup from cars sheet: {matched}/{len(dealers)} matched.')
 
         # ── Phase 3: write to dealers sheet ──────────────────────────────────
         dealers_ws = self._get_or_create_dealers_sheet()

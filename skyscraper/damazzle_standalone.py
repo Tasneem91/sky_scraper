@@ -444,8 +444,11 @@ def _parse_description_specs(data: Dict, description: str) -> None:
 
 class DamazzleScraper:
 
-    def __init__(self, full_mode: bool = False, max_hours: Optional[float] = None):
-        self.full_mode = full_mode
+    def __init__(self, full_mode: bool = False, max_hours: Optional[float] = None,
+                 start_date: Optional[str] = None, end_date: Optional[str] = None):
+        self.full_mode  = full_mode
+        self.start_date = start_date  # YYYY-MM-DD
+        self.end_date   = end_date    # YYYY-MM-DD
         self.deadline: Optional[datetime] = (
             datetime.now() + timedelta(hours=max_hours) if max_hours else None
         )
@@ -1076,22 +1079,25 @@ class DamazzleScraper:
                         _save_progress(progress)
                     break
 
-                # ── 2026 cutoff ───────────────────────────────────────────────
+                # ── Date-range filter ─────────────────────────────────────────
+                _cutoff = self.start_date or CUTOFF_DATE
                 dated = [c for c in cars if _parse_iso_date(c.get('published_date', ''))]
                 if dated and all(
-                    _parse_iso_date(c['published_date']) < CUTOFF_DATE for c in dated
+                    _parse_iso_date(c['published_date']) < _cutoff for c in dated
                 ):
-                    logger.info(f'  All listings are pre-{CUTOFF_DATE[:4]} — done.')
+                    logger.info(f'  All listings are before {_cutoff} — done.')
                     if self.full_mode:
                         progress['full_scrape_done'] = True
                         _save_progress(progress)
                     break
 
-                # Drop pre-cutoff items on a mixed page
+                # Drop items outside [start_date, end_date]
                 cars = [
                     c for c in cars
-                    if not _parse_iso_date(c.get('published_date', ''))
-                    or _parse_iso_date(c['published_date']) >= CUTOFF_DATE
+                    if (not _parse_iso_date(c.get('published_date', ''))
+                        or (_parse_iso_date(c['published_date']) >= _cutoff
+                            and (not self.end_date
+                                 or _parse_iso_date(c['published_date']) <= self.end_date)))
                 ]
 
                 # ── Filter to new listings only ───────────────────────────────
@@ -1186,6 +1192,22 @@ examples:
                         ))
     parser.add_argument('--repair-data', action='store_true',
                         help='Normalize all existing sheet rows to Sayarti canonical values.')
+
+    def _parse_date(s: str) -> str:
+        if re.match(r'^\d{4}-\d{2}-\d{2}$', s):
+            return s
+        m = re.match(r'^(\d{2})-(\d{2})-(\d{4})$', s)
+        if m:
+            return f'{m.group(3)}-{m.group(2)}-{m.group(1)}'
+        raise argparse.ArgumentTypeError(
+            f'Invalid date "{s}". Use YYYY-MM-DD or DD-MM-YYYY'
+        )
+
+    parser.add_argument('--start-date', type=_parse_date, default=None, metavar='DATE',
+                        help='Only scrape listings from this date onward (YYYY-MM-DD or DD-MM-YYYY). '
+                             'Stops pagination when all items on a page are older than this date.')
+    parser.add_argument('--end-date',   type=_parse_date, default=None, metavar='DATE',
+                        help='Only scrape listings up to this date (YYYY-MM-DD or DD-MM-YYYY).')
     args = parser.parse_args()
 
     if sys.stdout.encoding != 'utf-8':
@@ -1195,7 +1217,12 @@ examples:
         print(f'ERROR: OAuth2 client secret not found:\n  {OAUTH_CLIENT_FILE}')
         sys.exit(1)
 
-    scraper = DamazzleScraper(full_mode=args.full, max_hours=args.hours)
+    scraper = DamazzleScraper(
+        full_mode=args.full,
+        max_hours=args.hours,
+        start_date=args.start_date,
+        end_date=args.end_date,
+    )
     if args.repair_images:
         scraper._repair_images()
     elif args.repair_data:

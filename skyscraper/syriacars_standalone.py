@@ -368,8 +368,11 @@ class SyriaCarsScraper:
     and writes structured rows to Google Sheets.
     """
 
-    def __init__(self, full_mode: bool = False, max_hours: Optional[float] = None):
-        self.full_mode = full_mode
+    def __init__(self, full_mode: bool = False, max_hours: Optional[float] = None,
+                 start_date: Optional[str] = None, end_date: Optional[str] = None):
+        self.full_mode  = full_mode
+        self.start_date = start_date  # YYYY-MM-DD — skip listings older than this
+        self.end_date   = end_date    # YYYY-MM-DD — skip listings newer than this
         self.deadline: Optional[datetime] = (
             datetime.now() + timedelta(hours=max_hours) if max_hours else None
         )
@@ -1068,21 +1071,24 @@ class SyriaCarsScraper:
                     _save_progress(progress)
                 break
 
-            # ── 2026 cutoff ───────────────────────────────────────────────
-            # Listings are date-sorted DESC, so the first all-pre-2026 page
-            # means every subsequent page is also pre-2026 → stop.
+            # ── Date-range filter ─────────────────────────────────────────
+            # Listings are date-sorted DESC, so the first all-before-start_date
+            # page means every subsequent page is also too old → stop.
+            _cutoff = self.start_date or '2026-01-01'
             dated = [it for it in items if it.get('date_added')]
-            if dated and all(it['date_added'] < '2026-01-01' for it in dated):
-                logger.info('  All listings on this page are from before 2026 — done.')
+            if dated and all(it['date_added'] < _cutoff for it in dated):
+                logger.info(f'  All listings on this page are before {_cutoff} — done.')
                 if self.full_mode:
                     progress['full_scrape_done'] = True
                     _save_progress(progress)
                 break
 
-            # Drop any pre-2026 stragglers on a mixed page
+            # Drop items outside [start_date, end_date]
             items = [
                 it for it in items
-                if not it.get('date_added') or it['date_added'] >= '2026-01-01'
+                if (not it.get('date_added')
+                    or (it['date_added'] >= _cutoff
+                        and (not self.end_date or it['date_added'] <= self.end_date)))
             ]
 
             # ── Filter to new listings only ───────────────────────────────
@@ -1192,6 +1198,26 @@ examples:
         '--repair-data', action='store_true',
         help='Normalize all existing sheet rows to Sayarti canonical values.',
     )
+
+    def _parse_date(s: str) -> str:
+        if re.match(r'^\d{4}-\d{2}-\d{2}$', s):
+            return s
+        m = re.match(r'^(\d{2})-(\d{2})-(\d{4})$', s)
+        if m:
+            return f'{m.group(3)}-{m.group(2)}-{m.group(1)}'
+        raise argparse.ArgumentTypeError(
+            f'Invalid date "{s}". Use YYYY-MM-DD or DD-MM-YYYY'
+        )
+
+    parser.add_argument(
+        '--start-date', type=_parse_date, default=None, metavar='DATE',
+        help='Only scrape listings from this date onward (YYYY-MM-DD or DD-MM-YYYY). '
+             'Stops pagination when all items on a page are older than this date.',
+    )
+    parser.add_argument(
+        '--end-date', type=_parse_date, default=None, metavar='DATE',
+        help='Only scrape listings up to this date (YYYY-MM-DD or DD-MM-YYYY).',
+    )
     args = parser.parse_args()
 
     if sys.stdout.encoding != 'utf-8':
@@ -1205,7 +1231,12 @@ examples:
         )
         sys.exit(1)
 
-    scraper = SyriaCarsScraper(full_mode=args.full, max_hours=args.hours)
+    scraper = SyriaCarsScraper(
+        full_mode=args.full,
+        max_hours=args.hours,
+        start_date=args.start_date,
+        end_date=args.end_date,
+    )
     if args.repair_images:
         scraper._repair_images()
     elif args.repair_data:

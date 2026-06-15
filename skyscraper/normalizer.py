@@ -242,6 +242,8 @@ _ORIGIN_MAP = {
     'نمرة سوري':     'نمرة سورية',
     'نمره سورية':    'نمرة سورية',
     'نمره سوريه':    'نمرة سورية',
+    'صينية':         'صيني',
+    'يابانية':       'ياباني',
 }
 
 _BODY_MAP = {
@@ -256,14 +258,27 @@ _BODY_MAP = {
     'truck':       'نقل',
     'pickup':      'نقل',
     'بيك اب':      'نقل',
-    'بيك أب':      'نقل',
+    'بيك أب':       'نقل',
+    'شاحنة خفيفة':  'نقل',
+    'مركبة ثقيلة':  'نقل',
+    'باص':           'نقل',
+    'شاحنة بيك أب': 'نقل',
+    'شاحنة بيكآب':  'نقل',
+    'كروس أوفر':    'كروس',
+    'ستيشن واجن':   'واجن',
+    'كشف':           'كوبيه',
+    'مايكرو فان':   'ميني فان',
+    'فاتسباك':      'هاتشبك',
+    'فاستباك':      'هاتشبك',
 }
 
 # Make aliases — map website brand names to canonical Sayarti brand names
 _MAKE_MAP = {
-    'مرسيدس':        'مرسيدس بنز',
-    'mercedes':      'مرسيدس بنز',
-    'mercedes-benz': 'مرسيدس بنز',
+    'مرسيدس':        'مرسيدس',
+    'مرسيدس بنز':    'مرسيدس',
+    'mercedes':      'مرسيدس',
+    'mercedes-benz': 'مرسيدس',
+    'سامسونغ':       'رينو سامسونج',
     'bmw':           'بي ام دبليو',
     'vw':            'فولكس فاجن',
     'volkswagen':    'فولكس فاجن',
@@ -669,6 +684,170 @@ _MODEL_ALIASES = {
     'azkarra':            'ازكارا',
 }
 
+# City overrides — map sub-city / small-town names to their parent region.
+# Applied before fuzzy match so these explicit mappings take priority.
+_CITY_MAP = {
+    'النبك':    'ريف دمشق',
+    'محردة':    'ريف دمشق',
+    'دوما':     'ريف دمشق',
+    'السلمية':  'حماه',
+    'أعزاز':    'حلب',
+    'الطبقة':   'الرقة',
+    'صافيتا':   'طرطوس',
+}
+
+# Model aliases conditioned on make — checked before the global _MODEL_ALIASES.
+# Keys are lowercase (same convention as _MODEL_ALIASES).
+_MODEL_MAKE_ALIASES: dict = {
+    'أودي': {
+        'a5 coupe':    'A5',
+        'a6 3.0 tfsi': 'A6',
+        'a3 sedan':    'A3',
+        'a5 2.0t':     'A5',
+        's8':          'نماذج RS',
+        'a7 3.0t':     'A7',
+        'q7 3.0 tfsi': 'Q7',
+        'a8 3.0 tdi':  'A8',
+        'a4 2.0t':     'A4',
+    },
+    'بروتون': {
+        'بروتون ساجا':  'ساجا',
+        'proton gen-2': 'جين 2',
+    },
+    'بي ام دبليو': {
+        '130i':     'الفئة 1',
+        '316':      'الفئة 3',
+        '320d':     'الفئة 3',
+        '420d':     'الفئة 4',
+        '520d':     'الفئة 5',
+        '530d':     'الفئة 5',
+        '550i':     'الفئة 5',
+        'm3':       'M',
+        'm3 e36':   'M',
+        'm5':       'M',
+        'm5 e34':   'M',
+        'series 7': 'الفئة 7',
+        'x3 m':     'XM',
+        'x6 m':     'XM',
+    },
+    'تسلا': {
+        'تسلا مودل ي': 'الموديل Y',
+    },
+    'الفا روميو': {
+        'جيوليتتا': 'جولييتا',
+    },
+    'تويوتا': {
+        'افانزا': 'أفانزا',
+        'الفارد': 'ألفارد',
+        'هياك':   'هايس',
+    },
+    'جاكوار': {
+        'jaguar 5': 'جاكوار 5',
+    },
+    'جيلي': {
+        'geely ck1': 'CK1',
+        'geely ck2': 'CK2',
+    },
+    'داسيا': {
+        'لوجان': 'لوغان',
+    },
+    'دودج': {
+        'ram': 'رام',
+    },
+    'سكودا': {
+        'سوبرب':         'سوبيرب',
+        'وكتافيا':       'اوكتافيا',
+        'وكتافيا لجانك': 'اوكتافيا',
+    },
+    'سوبارو': {
+        'يمبرزا': 'امبريزا',
+    },
+    'سوزوكي': {
+        'التو': 'ألتو',
+    },
+    'سيات': {
+        'لون': 'ليون',
+    },
+    'سيتروين': {
+        'برلينجو': 'بيرلينجو',
+    },
+    'شيري': {
+        'tiggo 3': 'تيغو',
+    },
+    'شيفروليه': {
+        'silverado 1500': 'سيلفارادو',
+        'silverado z71':  'سيلفارادو',
+        'tahoe z71':      'تاهو',
+        'تاهو برمير':     'تاهو',
+        'ماليبو لت':      'ماليبو',
+    },
+    'فولفو': {
+        'volvo v40': 'V40',
+    },
+    'فيات': {
+        'سينا': 'سينيا',
+    },
+    'كيا': {
+        'سبورتاج جت-لين': 'سبورتاج',
+        'سدونا':           'سيدونا',
+    },
+    'مرسيدس': {
+        '190':        'الفئة C',
+        '200':        'الفئة C',
+        '240':        'الفئة C',
+        '300':        'الفئة E',
+        '320':        'الفئة E',
+        '350':        'الفئة S',
+        '400':        'الفئة S',
+        '420':        'الفئة S',
+        '450':        'الفئة S',
+        '500':        'الفئة S',
+        '600':        'الفئة S',
+        's-class':    'الفئة S',
+        'م-كلاسس':    'الفئة M',
+        'amg a 45':   'AMG',
+        'amg c 43':   'AMG',
+        'amg c 63':   'AMG',
+        'amg e 43':   'AMG',
+        'amg gle 53': 'AMG',
+        'amg s 63':   'AMG',
+        'amg sl 55':  'AMG',
+    },
+    'ميني': {
+        'كوبر':       'كومنتري مان',
+        'كوبر س':     'كومنتري مان',
+        'كوونتريمان': 'كومنتري مان',
+    },
+    'نيسان': {
+        'كس-ترايل': 'اكس ترايل',
+    },
+    'هوندا': {
+        'h-1 grand starex': 'ستاركس',
+    },
+    'هيونداي': {
+        'سانتافي':       'سانتا في',
+        'جنسيس كووب':    'جينسس',
+        'فلوستر ن':      'فوليستر',
+        'كسكل':          'إكسل',
+        'لافستا':        'لافيستا',
+        'لانترا هيبريد': 'هيونداي إلنترا',
+        'يونيك':         'أيونيك',
+    },
+}
+
+# When the canonical make name (output) differs from the key in car_models_FULL.json,
+# map canonical → file key so model lookup still works correctly.
+_MAKE_FILE_KEY: dict = {
+    'مرسيدس': 'مرسيدس بنز',
+}
+
+# Post-normalization make overrides — applied after alias+fuzzy match.
+# Catches cases where fuzzy match returns a file brand name that differs
+# from the canonical output name we want (e.g. fuzzy → 'مرسيدس بنز' → 'مرسيدس').
+_MAKE_POST_MAP: dict = {
+    'مرسيدس بنز': 'مرسيدس',
+}
+
 # Brand name prefixes to strip from model strings (e.g. "Toyota Rav4" → "Rav4")
 _BRAND_PREFIXES_TO_STRIP = [
     'toyota', 'hyundai', 'kia', 'nissan', 'honda', 'chevrolet',
@@ -866,6 +1045,9 @@ def normalize(field: str, raw) -> str:
 
     # ── City / location ───────────────────────────────────────────────────────
     if field == 'city':
+        result = _apply_hard_map(raw, _CITY_MAP)
+        if result:
+            return result
         matched = _best_match(raw, _list_values('location'))
         if matched:
             return matched
@@ -897,12 +1079,12 @@ def normalize(field: str, raw) -> str:
 
     # ── Make (brand) ──────────────────────────────────────────────────────────
     if field == 'make':
-        if not _all_brands:
-            return raw
-        # Check hard-coded alias map first
+        # Alias map always takes priority, even when the JSON file is absent
         alias = _apply_hard_map(raw, _MAKE_MAP)
         if alias:
             return alias
+        if not _all_brands:
+            return raw
         matched = _best_match(raw, _all_brands)
         if matched:
             return matched
@@ -956,6 +1138,7 @@ def normalize_car(car: dict) -> dict:
     # Normalize make first, then model within that brand's list
     raw_make  = result.get('make', '')
     norm_make = normalize('make', raw_make)
+    norm_make = _MAKE_POST_MAP.get(norm_make, norm_make)
     result['make'] = norm_make
 
     raw_model = result.get('model', '')
@@ -967,9 +1150,12 @@ def normalize_car(car: dict) -> dict:
         if 'لكزس' in norm_make or 'lexus' in norm_make.lower():
             clean = _strip_lexus_variant(clean)
 
-        # Step 3: check alias map (English → Arabic canonical)
+        # Step 3: check alias maps — make-specific first, then global
         alias_key = clean.strip().lower()
-        norm_model = _MODEL_ALIASES.get(alias_key)
+        norm_model = (
+            _apply_hard_map(clean, _MODEL_MAKE_ALIASES.get(norm_make, {}))
+            or _MODEL_ALIASES.get(alias_key)
+        )
 
         if norm_model is not None:
             # Known alias → use canonical name from alias map
@@ -979,7 +1165,8 @@ def normalize_car(car: dict) -> dict:
             # Step 4: fuzzy match against car_models_FULL.json (primary reference).
             # The file's form is always canonical — Arabic or English, whatever is
             # stored there.  We check the file BEFORE applying any fallback rule.
-            brand_models = _car_models.get(norm_make, [])
+            file_key = _MAKE_FILE_KEY.get(norm_make, norm_make)
+            brand_models = _car_models.get(file_key, [])
             if brand_models:
                 matched = _best_match(clean, brand_models)
             else:

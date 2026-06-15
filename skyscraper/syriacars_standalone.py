@@ -23,13 +23,17 @@ KEY BEHAVIOURS
 • Chapter specs : All h2 chapter sections (مواصفات السيارة, etc.) are parsed
                   in addition to the main spec list.
 
-COLUMNS (in sheet order)
-------------------------
-scraped_at | source | id | category | ad_title | listing_type | condition |
-body_type | brand | model | price | location | year | drive_system |
-transmission | fuel_type | mileage | engine | cylinders | color |
-interior_color | doors | vin | description | seller_name | contact |
-images | image_folder_url
+COLUMNS (in sheet order — same base as BazarAlsham + SyriaCars extras)
+------------------------------------------------------------------------
+id | source | car_url | make | model | year | body_type |
+exterior_color | interior_color | fuel_type | engine_size | cylinders | horsepower |
+transmission | doors | seats | steering_side |
+origin | condition | chassis_condition | warranty | chassis_number |
+city | mileage | price | date_added | views |
+phone | listing_id | seller_name | seller_type | seller_listings |
+description_original | features | safety_features |
+images_original_links | images_drive_links |
+drive_system | image_clean_link
 
 SETUP
 -----
@@ -99,8 +103,8 @@ OAUTH_TOKEN_FILE = os.path.join(SCRIPT_DIR, 'oauth_token.json')
 # Pause/resume progress (used in --full mode)
 PROGRESS_FILE = os.path.join(SCRIPT_DIR, 'syriacars_progress.json')
 
-# Google Sheets — target spreadsheet
-SHEET_ID = '17sJW61R7OetNenqn9gqw0BnRjdF2-ba525ld_xGOofQ'
+# Google Sheets — target spreadsheet (SyriaCarsCleanImages)
+SHEET_ID = '189XTSyzzCaltqY24N1npQ6C-JPhLVxfDBvf3BbPu_LM'
 
 # Google Drive — root folder for car images
 DRIVE_FOLDER_ID = '1m3Ne66uSpwWLFoQHnGgbxBe4DmUE4V2t'
@@ -175,6 +179,7 @@ SPEC_MAP: Dict[str, str] = {
 # ── Sheet columns (order = column order in spreadsheet) ───────────────────────
 
 COLUMNS: List[str] = [
+    # ── Shared with BazarAlsham ───────────────────────────────────────────
     'id', 'source', 'car_url',
     'make', 'model', 'year', 'body_type',
     'exterior_color', 'interior_color',
@@ -186,7 +191,10 @@ COLUMNS: List[str] = [
     'phone', 'listing_id',
     'seller_name', 'seller_type', 'seller_listings',
     'description_original',
+    'features', 'safety_features',
     'images_original_links', 'images_drive_links',
+    # ── SyriaCars-only ────────────────────────────────────────────────────
+    'drive_system',
     'image_clean_link',
 ]
 

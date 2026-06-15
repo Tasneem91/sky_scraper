@@ -941,41 +941,47 @@ class SyriaCarsScraper:
                 logger.error(f'  Fetch error: {exc}')
                 break
 
-            # Locate dealer anchor tags — try progressively wider selectors
-            card_anchors = (
-                soup.select('.dealer-card a[href*="/dealer/"]')
-                or soup.select('.dealers-list a[href*="/dealer/"]')
-                or [a for a in soup.select('a[href*="/dealer/"]')
-                    if a.find('h3')]
-            )
-            if not card_anchors:
-                logger.info('  No dealer cards found — stopping.')
+            # Each dealer has 3 flat <a href="/dealer/username/"> tags:
+            # image link, name text link, car-count text link — no card wrapper class.
+            # Group them all by username, then pick name from the text-only link.
+            all_dealer_links = soup.select('a[href*="/dealer/"]')
+            if not all_dealer_links:
+                logger.info('  No /dealer/ links found — stopping.')
                 break
 
-            before = len(dealers)
-            for a_tag in card_anchors:
+            # Collect unique usernames first
+            page_usernames: List[str] = []
+            for a_tag in all_dealer_links:
                 href = a_tag.get('href', '').rstrip('/')
                 if not href:
                     continue
+                if href.startswith('/'):
+                    href = BASE_URL + href
                 username = href.split('/dealer/')[-1].rstrip('/')
-                if not username or username in dealers:
-                    continue
+                if username and username not in dealers and username not in page_usernames:
+                    page_usernames.append(username)
 
-                name_el = a_tag.find('h3')
-                name    = _clean(name_el.get_text()) if name_el else username
-
+            before = len(dealers)
+            for username in page_usernames:
+                profile_url = f'{BASE_URL}/dealer/{username}/'
+                name      = ''
                 car_count = ''
-                for p in a_tag.find_all('p'):
-                    if 'سيارة' in p.get_text():
-                        m = re.search(r'\d+', p.get_text())
+                # Inspect all anchors for this username to find name + car count
+                for a_tag in soup.select(f'a[href*="/dealer/{username}/"]'):
+                    txt = _clean(a_tag.get_text())
+                    if not txt:
+                        continue
+                    if 'سيارة' in txt:
+                        m = re.search(r'\d+', txt)
                         if m:
                             car_count = m.group(0)
-                        break
+                    elif not name:
+                        name = txt   # first non-empty, non-car-count text = dealer name
 
                 dealers[username] = {
-                    'dealer_name': name,
+                    'dealer_name': name or username,
                     'username':    username,
-                    'profile_url': href + '/',
+                    'profile_url': profile_url,
                     'phone':       '',
                     'city':        '',
                     'car_count':   car_count,

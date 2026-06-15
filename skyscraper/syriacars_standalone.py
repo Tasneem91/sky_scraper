@@ -304,6 +304,26 @@ def _parse_price(text: str) -> Optional[str]:
         return None
 
 
+_HAS_ARABIC = re.compile(r'[؀-ۿ]')
+
+
+def _strip_foreign(text: str) -> str:
+    """
+    Syriacars stores many values as 'English - Arabic' or 'Arabic - English'.
+    Return just the Arabic portion when both are present; otherwise return as-is.
+    Examples:
+        'BMW - بي ام دابليو'  →  'بي ام دابليو'
+        'Rogue - روج'         →  'روج'
+        'كل الفئات'           →  'كل الفئات'   (unchanged)
+        'G class'             →  'G class'      (no Arabic → keep)
+    """
+    if not text or ' - ' not in text:
+        return text
+    parts = [p.strip() for p in text.split(' - ', 1)]
+    arabic_parts = [p for p in parts if _HAS_ARABIC.search(p)]
+    return arabic_parts[0] if arabic_parts else text
+
+
 def _listing_type(title: str) -> str:
     """Return 'للإيجار' if rental keywords appear, otherwise 'للبيع'."""
     if any(k in title for k in ('للإيجار', 'للايجار', 'للتأجير', 'إيجار')):
@@ -1066,6 +1086,12 @@ class SyriaCarsScraper:
 
         detail['images_drive_links'] = ', '.join(image_links)
         detail['image_clean_link']   = clean_link
+
+        # Strip 'English - Arabic' compound values syriacars puts in make/model
+        for _f in ('make', 'model', 'body_type', 'fuel_type', 'transmission',
+                   'condition', 'city', 'origin', 'exterior_color', 'interior_color'):
+            if detail.get(_f):
+                detail[_f] = _strip_foreign(detail[_f])
 
         # Normalize fields to Sayarti canonical values
         detail = normalize_car(detail)

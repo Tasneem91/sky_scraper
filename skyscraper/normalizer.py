@@ -24,8 +24,13 @@ from typing import Optional
 
 # ── Load sayarti.json ─────────────────────────────────────────────────────────
 
-_SAYARTI_PATH    = Path(__file__).parent / 'sayarti.json'
-_CAR_MODELS_PATH = Path(r'C:\Users\Tasnaim\Downloads\car_models_FULL.json')
+_SAYARTI_PATH = Path(__file__).parent / 'sayarti.json'
+
+# Search for car_models_FULL.json: script directory first, then original download path
+_CAR_MODELS_CANDIDATES = [
+    Path(__file__).parent / 'car_models_FULL.json',
+    Path(r'C:\Users\Tasnaim\Downloads\car_models_FULL.json'),
+]
 
 # Keys to skip — not real brands
 _SKIP_BRANDS = {'ماركة', 'Not set'}
@@ -48,23 +53,29 @@ def _load_car_models():
     global _all_brands, _car_models
     if _all_brands:
         return
-    try:
-        with open(_CAR_MODELS_PATH, encoding='utf-8') as f:
-            raw: dict = json.load(f)
-        for brand, models in raw.items():
-            brand = brand.strip()
-            if brand in _SKIP_BRANDS or not brand:
-                continue
-            clean_models = []
-            for m in models:
-                m = str(m).strip()
-                if m and m not in clean_models:
-                    clean_models.append(m)
-            if brand not in _car_models:
-                _car_models[brand] = clean_models
-                _all_brands.append(brand)
-    except Exception as exc:
-        print(f'[normalizer] Could not load car models JSON: {exc}')
+    for path in _CAR_MODELS_CANDIDATES:
+        try:
+            with open(path, encoding='utf-8') as f:
+                raw: dict = json.load(f)
+            for brand, models in raw.items():
+                brand = brand.strip()
+                if brand in _SKIP_BRANDS or not brand:
+                    continue
+                clean_models = []
+                for m in models:
+                    m = str(m).strip()
+                    if m and m not in clean_models:
+                        clean_models.append(m)
+                if brand not in _car_models:
+                    _car_models[brand] = clean_models
+                    _all_brands.append(brand)
+            print(f'[normalizer] Loaded car models from {path}')
+            return
+        except FileNotFoundError:
+            continue
+        except Exception as exc:
+            print(f'[normalizer] Error loading {path}: {exc}')
+    print('[normalizer] car_models_FULL.json not found — place it next to normalizer.py for fuzzy model matching')
 
 _load_car_models()
 
@@ -280,8 +291,10 @@ _MAKE_MAP = {
     'mercedes-benz': 'مرسيدس',
     'سامسونغ':       'رينو سامسونج',
     'bmw':           'بي ام دبليو',
+    'بي ام دابليو':  'بي ام دبليو',   # syriacars spelling
     'vw':            'فولكس فاجن',
     'volkswagen':    'فولكس فاجن',
+    'فولكسفاغن':     'فولكس فاجن',
     'hyundai':       'هيونداي',
     'kia':           'كيا',
     'toyota':        'تويوتا',
@@ -292,11 +305,13 @@ _MAKE_MAP = {
     'ford':          'فورد',
     'lexus':         'لكزس',
     'audi':          'أودي',
+    'ميتسوبيشي':    'ميتسوبيشي',
     'mitsubishi':    'ميتسوبيشي',
     'subaru':        'سوبارو',
     'suzuki':        'سوزوكي',
     'mazda':         'مازدا',
     'land rover':    'لاند روفر',
+    'landrover':     'لاند روفر',
     'cadillac':      'كاديلاك',
     'porsche':       'بورش',
     'maserati':      'مازيراتي',
@@ -306,6 +321,24 @@ _MAKE_MAP = {
     'chery':         'شيري',
     'haval':         'هافال',
     'mg':            'ام جي',
+    'infiniti':      'إنفينيتي',
+    'انفينيتي':      'إنفينيتي',   # syriacars spelling
+    'إنفينيتي':      'إنفينيتي',
+    'جيب':           'جيب',
+    'jeep':          'جيب',
+    'dodge':         'دودج',
+    'chrysler':      'كرايسلر',
+    'volvo':         'فولفو',
+    'skoda':         'سكودا',
+    'seat':          'سيات',
+    'fiat':          'فيات',
+    'opel':          'أوبل',
+    'citroen':       'سيتروين',
+    'geely':         'جيلي',
+    'byd':           'بي واي دي',
+    'changan':       'شانجان',
+    'proton':        'بروتون',
+    'dacia':         'داسيا',
 }
 
 # Model aliases: English/variant name (lowercase) → canonical Sayarti model name

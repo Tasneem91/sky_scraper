@@ -1026,11 +1026,9 @@ class SyriaCarsScraper:
                         logger.warning(f'    Download failed ({img_url[-60:]}): {exc}')
                         downloaded.append((img_url, None, 'image/jpeg'))
 
-                # ── Pick best image (largest file = most content) ─────────
-                best_idx, best_size = 0, 0
-                for i, (_, data, _mime) in enumerate(downloaded):
-                    if data and len(data) > best_size:
-                        best_size, best_idx = len(data), i
+                # ── Pick best image (first image = main listing photo) ────
+                best_idx  = 0
+                best_size = len(downloaded[0][1]) if downloaded and downloaded[0][1] else 0
 
                 # ── Upload all originals to Drive ─────────────────────────
                 for idx, (img_url, img_bytes, mime) in enumerate(downloaded, 1):

@@ -382,9 +382,11 @@ class SyriaCarsScraper:
     """
 
     def __init__(self, full_mode: bool = False, max_hours: Optional[float] = None,
+                 max_pages: Optional[int] = None,
                  start_date: Optional[str] = None, end_date: Optional[str] = None,
                  dewatermark_key: Optional[str] = None):
         self.full_mode       = full_mode
+        self.max_pages       = max_pages        # stop after this many pages
         self.start_date      = start_date       # YYYY-MM-DD — skip listings older than this
         self.end_date        = end_date         # YYYY-MM-DD — skip listings newer than this
         self.dewatermark_key = dewatermark_key  # dewatermark.ai API key
@@ -1123,6 +1125,9 @@ class SyriaCarsScraper:
             # ── Check stop conditions before each new page ─────────────────
             if self._should_stop():
                 break
+            if self.max_pages and page > self.max_pages:
+                logger.info(f'Reached --pages limit ({self.max_pages}) — stopping.')
+                break
 
             # Sort by date descending so page 1 always has the newest listings,
             # not featured (مميز) listings pinned to the top regardless of age.
@@ -1265,6 +1270,10 @@ examples:
         help='Stop gracefully after N hours (e.g. --hours 2)',
     )
     parser.add_argument(
+        '--pages', type=int, default=None, metavar='N',
+        help='Stop after scraping N pages (e.g. --pages 1 for a quick test)',
+    )
+    parser.add_argument(
         '--full', action='store_true',
         help=(
             'Full-scrape mode: resume from the last saved page '
@@ -1324,6 +1333,7 @@ examples:
     scraper = SyriaCarsScraper(
         full_mode=args.full,
         max_hours=args.hours,
+        max_pages=args.pages,
         start_date=args.start_date,
         end_date=args.end_date,
         dewatermark_key=args.dewatermark_key,

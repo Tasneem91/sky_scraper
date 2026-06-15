@@ -284,11 +284,17 @@ def _clean(text: Optional[str]) -> str:
 def _clean_mileage(v: str) -> str:
     """
     Remove Arabic/Latin 'km' suffix and thousands-separators from a mileage string.
+    Handles 'X ألف' (= X thousand) before clean_number strips 'ألف'.
     '150,000 كم' → '150000'
     '75٬000 km'  → '75000'
+    '210 ألف كم' → '210000'
+    '245 ألف'    → '245000'
     """
-    v = re.sub(r'[,،٬]', '', v)                      # remove comma variants
+    v = re.sub(r'[,،٬]', '', v)
     v = re.sub(r'\s*(كم|km)\s*$', '', v, flags=re.I).strip()
+    m = re.match(r'^(\d+)\s*ألف\s*$', v)
+    if m:
+        return str(int(m.group(1)) * 1000)
     return v
 
 
@@ -307,19 +313,35 @@ def _parse_price(text: str) -> Optional[str]:
 _HAS_ARABIC = re.compile(r'[؀-ۿ]')
 
 
+_ALL_MODELS_SUFFIX = re.compile(r'\s*كل الفئات\s*$')
+_COMPOUND_SEP      = re.compile(r'\s*[-–]\s*')
+
+
 def _strip_foreign(text: str) -> str:
     """
-    Syriacars stores many values as 'English - Arabic' or 'Arabic - English'.
-    Return just the Arabic portion when both are present; otherwise return as-is.
+    Syriacars stores many values as 'English - Arabic', 'Arabic - English',
+    or 'Arabic-English' (no spaces around dash). Return just the Arabic portion
+    when both are present; otherwise return as-is.
+    Also strips 'كل الفئات' (= 'all categories') which appears when the site
+    has no specific model selected.
     Examples:
         'BMW - بي ام دابليو'  →  'بي ام دابليو'
         'Rogue - روج'         →  'روج'
-        'كل الفئات'           →  'كل الفئات'   (unchanged)
-        'G class'             →  'G class'      (no Arabic → keep)
+        'روج-Rogue'           →  'روج'
+        'G class كل الفئات'   →  'G class'
+        'كل الفئات'           →  '' (empty — no real value)
+        'G class'             →  'G class'   (no Arabic → keep)
     """
-    if not text or ' - ' not in text:
+    if not text:
         return text
-    parts = [p.strip() for p in text.split(' - ', 1)]
+    # Strip 'كل الفئات' suffix (site artifact meaning "all models")
+    text = _ALL_MODELS_SUFFIX.sub('', text).strip()
+    if not text:
+        return ''
+    # Split on ' - ' or '-' between Arabic and non-Arabic parts
+    parts = [p.strip() for p in _COMPOUND_SEP.split(text) if p.strip()]
+    if len(parts) < 2:
+        return text
     arabic_parts = [p for p in parts if _HAS_ARABIC.search(p)]
     return arabic_parts[0] if arabic_parts else text
 

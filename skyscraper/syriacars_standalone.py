@@ -23,17 +23,13 @@ KEY BEHAVIOURS
 • Chapter specs : All h2 chapter sections (مواصفات السيارة, etc.) are parsed
                   in addition to the main spec list.
 
-COLUMNS (in sheet order — same base as BazarAlsham + SyriaCars extras)
-------------------------------------------------------------------------
+COLUMNS (in sheet order — syriacars-specific schema)
+-----------------------------------------------------
 id | source | car_url | make | model | year | body_type |
-exterior_color | interior_color | fuel_type | engine_size | cylinders | horsepower |
-transmission | doors | seats | steering_side |
-origin | condition | chassis_condition | warranty | chassis_number |
-city | mileage | price | date_added | views |
-phone | listing_id | seller_name | seller_type | seller_listings |
-description_original | features | safety_features |
-images_original_links | images_drive_links |
-drive_system | image_clean_link
+exterior_color | interior_color | fuel_type | engine_size | transmission |
+condition | city | mileage | price | date_added | views |
+phone | listing_id | seller_name | seller_type | seller_notes |
+images_drive_links | drive_system | image_clean_link
 
 SETUP
 -----
@@ -63,6 +59,7 @@ import signal
 import sys
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 import requests
@@ -133,6 +130,13 @@ SCOPES = [
 # Dewatermark.ai API
 DEWATERMARK_URL = 'https://platform.dewatermark.ai/api/object_removal/v2/erase_watermark'
 
+# Dealer list scraper
+DEALERS_LIST_URL    = f'{BASE_URL}/dealers-list/'
+DEALERS_SHEET_ID_FILE = Path(__file__).parent / 'syriacars_dealers_sheet_id.txt'
+DEALERS_COLUMNS: List[str] = [
+    'dealer_name', 'username', 'profile_url', 'phone', 'city', 'car_count', 'scraped_at',
+]
+
 # Seconds between HTTP requests (polite crawling)
 REQUEST_DELAY = 0.6
 
@@ -179,21 +183,17 @@ SPEC_MAP: Dict[str, str] = {
 # ── Sheet columns (order = column order in spreadsheet) ───────────────────────
 
 COLUMNS: List[str] = [
-    # ── Shared with BazarAlsham ───────────────────────────────────────────
     'id', 'source', 'car_url',
     'make', 'model', 'year', 'body_type',
     'exterior_color', 'interior_color',
-    'fuel_type', 'engine_size', 'cylinders', 'horsepower',
-    'transmission', 'doors', 'seats', 'steering_side',
-    'origin', 'condition', 'chassis_condition', 'warranty', 'chassis_number',
+    'fuel_type', 'engine_size', 'transmission',
+    'condition',
     'city', 'mileage', 'price',
     'date_added', 'views',
     'phone', 'listing_id',
-    'seller_name', 'seller_type', 'seller_listings',
-    'description_original',
-    'features', 'safety_features',
-    'images_original_links', 'images_drive_links',
-    # ── SyriaCars-only ────────────────────────────────────────────────────
+    'seller_name', 'seller_type',
+    'seller_notes',
+    'images_drive_links',
     'drive_system',
     'image_clean_link',
 ]
@@ -765,10 +765,28 @@ class SyriaCarsScraper:
                             data['description_original'] = desc
                     break
 
-        # ── Seller name ───────────────────────────────────────────────────────
-        dealer = soup.select_one('.single-listing-dealer-name')
-        if dealer:
-            data['seller_name'] = _clean(dealer.get_text())
+        # ── Seller notes (ملاحظات البائع) ────────────────────────────────────
+        for h in soup.find_all(['h2', 'h3', 'h4', 'h5'],
+                               string=re.compile(r'ملاحظات|seller.?note', re.I)):
+            nxt = h.find_next_sibling()
+            while nxt and nxt.name in ('br', 'script', 'style'):
+                nxt = nxt.find_next_sibling()
+            if nxt:
+                notes = _clean(nxt.get_text(separator=' '))
+                if notes and notes not in ('غير معروف', 'N/A', 'n/a', '-'):
+                    data['seller_notes'] = notes
+            break
+
+        # ── Seller name + type ────────────────────────────────────────────────
+        # Business listings wrap the seller name in a /dealer/ profile link.
+        dealer_el = soup.select_one('.single-listing-dealer-name')
+        if dealer_el:
+            data['seller_name'] = _clean(dealer_el.get_text())
+            dealer_a = (dealer_el if dealer_el.name == 'a'
+                        else dealer_el.find('a', href=re.compile(r'/dealer/')))
+            data['seller_type'] = 'dealer' if dealer_a else 'private'
+        else:
+            data['seller_type'] = 'private'
 
         # ── Contact ───────────────────────────────────────────────────────────
         # The Motors theme embeds the full phone number directly in the static HTML
@@ -875,14 +893,172 @@ class SyriaCarsScraper:
         except Exception as exc:
             logger.warning(f'Could not sort sheet: {exc}')
 
+    # ── Dealers sheet helpers ─────────────────────────────────────────────────
+
+    def _get_or_create_dealers_sheet(self):
+        """Open the dealers sheet by saved ID, or create a new spreadsheet."""
+        if DEALERS_SHEET_ID_FILE.exists():
+            sheet_id = DEALERS_SHEET_ID_FILE.read_text().strip()
+            try:
+                ws = self.gc.open_by_key(sheet_id).sheet1
+                logger.info(f'Opened existing dealers sheet: {sheet_id}')
+                return ws
+            except Exception as exc:
+                logger.warning(f'Saved dealers sheet ID not usable ({exc}), creating new …')
+
+        sh = self.gc.create('SyriaCarsDealers')
+        sh.share('', perm_type='anyone', role='reader')
+        ws = sh.sheet1
+        ws.update_title('Dealers')
+        ws.append_row(DEALERS_COLUMNS)
+        DEALERS_SHEET_ID_FILE.write_text(sh.id)
+        logger.info(f'Created dealers sheet: {sh.id}  →  {sh.url}')
+        return ws
+
+    def scrape_dealers(self):
+        """
+        Scrape syriacars.net/dealers-list/ (all pages), enrich each dealer with
+        city and phone (fetched from one of their car listing pages), then write
+        all results to the SyriaCarsDealers Google Sheet.
+        """
+        logger.info('=== Dealer scraper ===')
+        dealers: Dict[str, Dict] = {}   # username → info dict
+
+        # ── Phase 1: paginate dealer list ────────────────────────────────────
+        page = 1
+        while True:
+            url = (DEALERS_LIST_URL if page == 1
+                   else f'{DEALERS_LIST_URL}page/{page}/')
+            logger.info(f'  [page {page}] {url}')
+            try:
+                soup = self._fetch(url)
+            except requests.HTTPError as exc:
+                if exc.response.status_code == 404:
+                    break
+                logger.error(f'  HTTP error: {exc}')
+                break
+            except Exception as exc:
+                logger.error(f'  Fetch error: {exc}')
+                break
+
+            # Locate dealer anchor tags — try progressively wider selectors
+            card_anchors = (
+                soup.select('.dealer-card a[href*="/dealer/"]')
+                or soup.select('.dealers-list a[href*="/dealer/"]')
+                or [a for a in soup.select('a[href*="/dealer/"]')
+                    if a.find('h3')]
+            )
+            if not card_anchors:
+                logger.info('  No dealer cards found — stopping.')
+                break
+
+            before = len(dealers)
+            for a_tag in card_anchors:
+                href = a_tag.get('href', '').rstrip('/')
+                if not href:
+                    continue
+                username = href.split('/dealer/')[-1].rstrip('/')
+                if not username or username in dealers:
+                    continue
+
+                name_el = a_tag.find('h3')
+                name    = _clean(name_el.get_text()) if name_el else username
+
+                car_count = ''
+                for p in a_tag.find_all('p'):
+                    if 'سيارة' in p.get_text():
+                        m = re.search(r'\d+', p.get_text())
+                        if m:
+                            car_count = m.group(0)
+                        break
+
+                dealers[username] = {
+                    'dealer_name': name,
+                    'username':    username,
+                    'profile_url': href + '/',
+                    'phone':       '',
+                    'city':        '',
+                    'car_count':   car_count,
+                    'scraped_at':  datetime.now().date().isoformat(),
+                }
+
+            added = len(dealers) - before
+            logger.info(f'  +{added} dealers  (total so far: {len(dealers)})')
+            if added == 0:
+                break   # no new cards — end of list
+            page += 1
+            time.sleep(REQUEST_DELAY)
+
+        logger.info(f'Dealer list done: {len(dealers)} dealers found.')
+        if not dealers:
+            logger.warning('No dealers found — aborting.')
+            return
+
+        # ── Phase 2: enrich with city + phone via profile & car pages ────────
+        for i, (username, d) in enumerate(dealers.items(), 1):
+            logger.info(f'  [{i}/{len(dealers)}] {d["dealer_name"]}')
+            try:
+                prof_soup = self._fetch(d['profile_url'])
+
+                # City from "<h5>الموقع</h5>" sibling
+                for h in prof_soup.find_all(['h4', 'h5']):
+                    if 'الموقع' in h.get_text() or 'Location' in h.get_text(strip=True):
+                        city_el = h.find_next_sibling()
+                        if city_el:
+                            city = _clean(city_el.get_text())
+                            if city and city.lower() not in ('غير معروف', 'unknown'):
+                                d['city'] = city
+                        break
+
+                # Find any /car/<id>/ link on the dealer's profile page
+                car_a = next(
+                    (a for a in prof_soup.select('a[href*="/car/"]')
+                     if re.search(r'/car/\d+', a.get('href', ''))),
+                    None,
+                )
+                if car_a:
+                    time.sleep(REQUEST_DELAY)
+                    car_soup = self._fetch(car_a['href'])
+                    phone_span = car_soup.select_one('span.single-listing-phone-number')
+                    if phone_span:
+                        d['phone'] = _clean(phone_span.get_text())
+                    if not d['phone']:
+                        tel_a = car_soup.select_one(
+                            'a.single-listing-phone-button[href^="tel:"]'
+                        )
+                        if tel_a:
+                            d['phone'] = tel_a['href'].replace('tel:', '').strip()
+            except Exception as exc:
+                logger.warning(f'    Could not enrich {username}: {exc}')
+            time.sleep(REQUEST_DELAY)
+
+        # ── Phase 3: write to dealers sheet ──────────────────────────────────
+        dealers_ws = self._get_or_create_dealers_sheet()
+
+        all_vals = dealers_ws.get_all_values()
+        if len(all_vals) > 1:
+            dealers_ws.delete_rows(2, len(all_vals))
+
+        rows = [[d.get(col, '') for col in DEALERS_COLUMNS]
+                for d in dealers.values()]
+        if rows:
+            dealers_ws.append_rows(rows, value_input_option='RAW')
+
+        logger.info(f'Dealers sheet updated — {len(rows)} rows written.')
+
+        local_json = Path(__file__).parent / 'syriacars_dealers.json'
+        with open(local_json, 'w', encoding='utf-8') as f:
+            json.dump(list(dealers.values()), f, ensure_ascii=False, indent=2)
+        logger.info(f'Saved {local_json}')
+
     # ── Repair-data mode ─────────────────────────────────────────────────────
 
     def repair_data(self):
         """Normalize all existing sheet rows using Sayarti canonical values."""
         logger.info('=== Repair-data mode (normalize all fields) ===')
         NORMALIZABLE = [
-            'price', 'engine_size', 'mileage', 'year', 'seats', 'horsepower',
-            'cylinders', 'doors', 'fuel_type', 'transmission', 'origin',
+            'price', 'engine_size', 'mileage', 'year',
+            'fuel_type', 'transmission',
             'body_type', 'city', 'exterior_color', 'interior_color', 'condition',
             'make', 'model',
         ]
@@ -1345,6 +1521,14 @@ examples:
         '--repair-data', action='store_true',
         help='Normalize all existing sheet rows to Sayarti canonical values.',
     )
+    parser.add_argument(
+        '--scrape-dealers', action='store_true',
+        help=(
+            'Scrape syriacars.net/dealers-list/, enrich each dealer with phone '
+            'and city, then write results to the SyriaCarsDealers Google Sheet '
+            '(created automatically on first run).'
+        ),
+    )
 
     def _parse_date(s: str) -> str:
         if re.match(r'^\d{4}-\d{2}-\d{2}$', s):
@@ -1391,7 +1575,9 @@ examples:
         end_date=args.end_date,
         dewatermark_key=args.dewatermark_key,
     )
-    if args.repair_images:
+    if args.scrape_dealers:
+        scraper.scrape_dealers()
+    elif args.repair_images:
         scraper._repair_images()
     elif args.repair_data:
         scraper.repair_data()

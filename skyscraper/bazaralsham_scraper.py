@@ -641,6 +641,9 @@ class BazarAlshamScraper:
         self.sheet  = SheetManager(gc)
         self.session = make_session()
         get_csrf_token(self.session)
+        self.start_date: Optional[str] = None  # YYYY-MM-DD
+        self.end_date:   Optional[str] = None  # YYYY-MM-DD
+        self._past_start_date: bool = False    # signals pagination to stop
 
     def _process_card(self, card: dict, idx: int) -> bool:
         """Scrape detail, upload images, write to sheet. Returns True if written."""
@@ -655,6 +658,18 @@ class BazarAlshamScraper:
         logger.info(f'  [{idx}] {car_id} — {car_url[-55:]}')
 
         detail = scrape_detail(self.session, car_url)
+
+        # ── Date-range filter ────────────────────────────────────────────────
+        date_added = detail.get('date_added', '')
+        if date_added:
+            if self.end_date and date_added > self.end_date:
+                logger.info(f'  [{idx}] {car_id} — date {date_added} after --end-date {self.end_date}, skip')
+                return False
+            if self.start_date and date_added < self.start_date:
+                logger.info(f'  [{idx}] {car_id} — date {date_added} before --start-date {self.start_date}, stopping')
+                self._past_start_date = True
+                return False
+
         car = {**card, **detail}
         car['source']  = 'bazaralsham'
         car['car_url'] = car_url
@@ -680,8 +695,17 @@ class BazarAlshamScraper:
         logger.info(f'    ✓ Written to sheet')
         return True
 
-    def run(self, max_pages: Optional[int] = None, max_hours: Optional[float] = None):
+    def run(self, max_pages: Optional[int] = None, max_hours: Optional[float] = None,
+            start_date: Optional[str] = None, end_date: Optional[str] = None):
+        self.start_date = start_date
+        self.end_date   = end_date
+        self._past_start_date = False
+
         logger.info('=== BazarAlsham Scraper — FULL RUN ===')
+        if start_date:
+            logger.info(f'Date filter: from {start_date}')
+        if end_date:
+            logger.info(f'Date filter: up to {end_date}')
 
         deadline = None
         if max_hours:
@@ -705,6 +729,9 @@ class BazarAlshamScraper:
             if self._process_card(card, total_seen):
                 new_count += 1
                 time.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
+            if self._past_start_date:
+                logger.info('Reached start-date boundary — stopping.')
+                stopped = True; break
 
         # ── Pages 2+ (load-more API) ───────────────────────────────────────────
         page = 1
@@ -734,12 +761,15 @@ class BazarAlshamScraper:
                 if self._process_card(card, total_seen):
                     new_count += 1
                     time.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
+                if self._past_start_date:
+                    logger.info('Reached start-date boundary — stopping.')
+                    stopped = True; break
 
             if not data.get('hasMore'):
                 logger.info('No more pages.')
                 break
 
-        if stopped:
+        if stopped and not self._past_start_date:
             logger.info(f'⏰ Time limit reached after {new_count} new cars.')
 
         self.sheet.sort_by_date()
@@ -822,12 +852,28 @@ if __name__ == '__main__':
         print(f'ERROR: OAuth2 client secret not found:\n  {OAUTH_CLIENT_FILE}')
         sys.exit(1)
 
+    def _parse_date(s: str) -> str:
+        """Accept YYYY-MM-DD or DD-MM-YYYY, return YYYY-MM-DD."""
+        if re.match(r'^\d{4}-\d{2}-\d{2}$', s):
+            return s
+        m = re.match(r'^(\d{2})-(\d{2})-(\d{4})$', s)
+        if m:
+            return f'{m.group(3)}-{m.group(2)}-{m.group(1)}'
+        raise argparse.ArgumentTypeError(
+            f'Invalid date "{s}". Use YYYY-MM-DD or DD-MM-YYYY'
+        )
+
     parser = argparse.ArgumentParser(description='BazarAlsham scraper')
     parser.add_argument('--full',    action='store_true', help='Scrape all pages')
     parser.add_argument('--pages',   type=int, default=None, metavar='N',
                         help='Max number of pages to scrape (each page ≈ 20 cars)')
     parser.add_argument('--hours',   type=float, default=None, metavar='H',
                         help='Stop after this many hours (e.g. --hours 1)')
+    parser.add_argument('--start-date', type=_parse_date, default=None, metavar='DATE',
+                        help='Only scrape listings from this date onward (YYYY-MM-DD or DD-MM-YYYY). '
+                             'Stops pagination when listing date goes before this value.')
+    parser.add_argument('--end-date',   type=_parse_date, default=None, metavar='DATE',
+                        help='Only scrape listings up to this date (YYYY-MM-DD or DD-MM-YYYY).')
     parser.add_argument('--repair-images', action='store_true',
                         help='Re-upload failed Drive images')
     parser.add_argument('--repair-data', action='store_true',
@@ -842,4 +888,9 @@ if __name__ == '__main__':
         scraper.repair_data()
     else:
         max_pages = None if (args.full or args.hours) else (args.pages or 3)
-        scraper.run(max_pages=max_pages, max_hours=args.hours)
+        scraper.run(
+            max_pages=max_pages,
+            max_hours=args.hours,
+            start_date=args.start_date,
+            end_date=args.end_date,
+        )

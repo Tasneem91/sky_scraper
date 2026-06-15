@@ -49,6 +49,7 @@ USAGE
 """
 
 import argparse
+import base64
 import io
 import json
 import logging
@@ -125,6 +126,9 @@ SCOPES = [
     'https://www.googleapis.com/auth/drive',
 ]
 
+# Dewatermark.ai API
+DEWATERMARK_URL = 'https://platform.dewatermark.ai/api/object_removal/v2/erase_watermark'
+
 # Seconds between HTTP requests (polite crawling)
 REQUEST_DELAY = 0.6
 
@@ -183,6 +187,7 @@ COLUMNS: List[str] = [
     'seller_name', 'seller_type', 'seller_listings',
     'description_original',
     'images_original_links', 'images_drive_links',
+    'image_clean_link',
 ]
 
 # ── OAuth2 helpers ────────────────────────────────────────────────────────────
@@ -369,10 +374,12 @@ class SyriaCarsScraper:
     """
 
     def __init__(self, full_mode: bool = False, max_hours: Optional[float] = None,
-                 start_date: Optional[str] = None, end_date: Optional[str] = None):
-        self.full_mode  = full_mode
-        self.start_date = start_date  # YYYY-MM-DD — skip listings older than this
-        self.end_date   = end_date    # YYYY-MM-DD — skip listings newer than this
+                 start_date: Optional[str] = None, end_date: Optional[str] = None,
+                 dewatermark_key: Optional[str] = None):
+        self.full_mode       = full_mode
+        self.start_date      = start_date       # YYYY-MM-DD — skip listings older than this
+        self.end_date        = end_date         # YYYY-MM-DD — skip listings newer than this
+        self.dewatermark_key = dewatermark_key  # dewatermark.ai API key
         self.deadline: Optional[datetime] = (
             datetime.now() + timedelta(hours=max_hours) if max_hours else None
         )
@@ -488,19 +495,12 @@ class SyriaCarsScraper:
         self._make_public(f['id'])
         return f['id'], f.get('webViewLink', '')
 
-    def _upload_image(
-        self, img_url: str, folder_id: str, filename: str
+    def _upload_bytes(
+        self, data: bytes, mime: str, folder_id: str, filename: str
     ) -> Optional[str]:
-        """
-        Download *img_url* and upload it to *folder_id* as *filename*.
-        Returns the Google Drive webViewLink, or None on failure.
-        Files are owned by the OAuth2 user — no storage-quota issues.
-        """
+        """Upload raw bytes to *folder_id*. Returns webViewLink or None."""
         try:
-            r = requests.get(img_url, headers=HEADERS, timeout=30)
-            r.raise_for_status()
-            mime = r.headers.get('Content-Type', 'image/jpeg').split(';')[0]
-            media = MediaIoBaseUpload(io.BytesIO(r.content), mimetype=mime)
+            media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mime)
             f = self.drive.files().create(
                 body={'name': filename, 'parents': [folder_id]},
                 media_body=media,
@@ -509,7 +509,42 @@ class SyriaCarsScraper:
             self._make_public(f['id'])
             return f.get('webViewLink', '')
         except Exception as exc:
-            logger.warning(f'    Image upload failed ({img_url}): {exc}')
+            logger.warning(f'    Drive upload failed ({filename}): {exc}')
+            return None
+
+    def _upload_image(
+        self, img_url: str, folder_id: str, filename: str
+    ) -> Optional[str]:
+        """Download *img_url* and upload to Drive. Returns webViewLink or None."""
+        try:
+            r = requests.get(img_url, headers=HEADERS, timeout=30)
+            r.raise_for_status()
+            mime = r.headers.get('Content-Type', 'image/jpeg').split(';')[0]
+            return self._upload_bytes(r.content, mime, folder_id, filename)
+        except Exception as exc:
+            logger.warning(f'    Image download failed ({img_url}): {exc}')
+            return None
+
+    def _remove_watermark(self, image_bytes: bytes) -> Optional[bytes]:
+        """
+        Send *image_bytes* to dewatermark.ai and return clean image bytes.
+        Returns None on failure.
+        """
+        try:
+            resp = requests.post(
+                DEWATERMARK_URL,
+                headers={'X-API-KEY': self.dewatermark_key},
+                files={'original_preview_image': ('image.jpg', image_bytes, 'image/jpeg')},
+                timeout=60,
+            )
+            resp.raise_for_status()
+            b64 = resp.json().get('edited_image', {}).get('image', '')
+            if not b64:
+                logger.warning('  Dewatermark: empty image in response')
+                return None
+            return base64.b64decode(b64)
+        except Exception as exc:
+            logger.warning(f'  Dewatermark API error: {exc}')
             return None
 
     # ── HTTP fetch ────────────────────────────────────────────────────────────
@@ -961,18 +996,59 @@ class SyriaCarsScraper:
 
         image_urls: List[str] = detail.pop('_image_urls', [])
         image_links: List[str] = []
-        folder_url = ''
+        clean_link  = ''
+        folder_url  = ''
 
         if image_urls:
             folder_name = f'syriacars_{listing_id}'
             try:
                 folder_id, folder_url = self._create_subfolder(folder_name)
-                for idx, img_url in enumerate(image_urls, 1):
-                    ext   = img_url.rsplit('.', 1)[-1].lower() or 'jpg'
+
+                # ── Download all images once ──────────────────────────────
+                downloaded: List[Tuple[str, Optional[bytes], str]] = []
+                for img_url in image_urls:
+                    try:
+                        r = requests.get(img_url, headers=HEADERS, timeout=30)
+                        r.raise_for_status()
+                        mime = r.headers.get('Content-Type', 'image/jpeg').split(';')[0]
+                        downloaded.append((img_url, r.content, mime))
+                    except Exception as exc:
+                        logger.warning(f'    Download failed ({img_url[-60:]}): {exc}')
+                        downloaded.append((img_url, None, 'image/jpeg'))
+
+                # ── Pick best image (largest file = most content) ─────────
+                best_idx, best_size = 0, 0
+                for i, (_, data, _mime) in enumerate(downloaded):
+                    if data and len(data) > best_size:
+                        best_size, best_idx = len(data), i
+
+                # ── Upload all originals to Drive ─────────────────────────
+                for idx, (img_url, img_bytes, mime) in enumerate(downloaded, 1):
+                    if img_bytes is None:
+                        continue
+                    ext = img_url.rsplit('.', 1)[-1].lower() or 'jpg'
                     fname = f'{listing_id}_{idx:02d}.{ext}'
-                    link  = self._upload_image(img_url, folder_id, fname)
+                    link = self._upload_bytes(img_bytes, mime, folder_id, fname)
                     if link:
                         image_links.append(link)
+
+                # ── Watermark removal on best image ───────────────────────
+                if self.dewatermark_key and downloaded and downloaded[best_idx][1]:
+                    best_bytes = downloaded[best_idx][1]
+                    logger.info(
+                        f'  Removing watermark from image {best_idx + 1}'
+                        f' ({best_size // 1024} KB)…'
+                    )
+                    clean_bytes = self._remove_watermark(best_bytes)
+                    if clean_bytes:
+                        clean_link = self._upload_bytes(
+                            clean_bytes, 'image/jpeg',
+                            folder_id, f'{listing_id}_clean.jpg',
+                        ) or ''
+                        logger.info('  ✓ Clean image uploaded')
+                    else:
+                        logger.warning('  Watermark removal returned no image — skipped')
+
                 logger.info(
                     f'  Uploaded {len(image_links)}/{len(image_urls)} images'
                     f' → {folder_url}'
@@ -981,6 +1057,7 @@ class SyriaCarsScraper:
                 logger.error(f'  Drive error for {listing_id}: {exc}')
 
         detail['images_drive_links'] = ', '.join(image_links)
+        detail['image_clean_link']   = clean_link
 
         # Normalize fields to Sayarti canonical values
         detail = normalize_car(detail)
@@ -1218,6 +1295,11 @@ examples:
         '--end-date', type=_parse_date, default=None, metavar='DATE',
         help='Only scrape listings up to this date (YYYY-MM-DD or DD-MM-YYYY).',
     )
+    parser.add_argument(
+        '--dewatermark-key', default=None, metavar='KEY',
+        help='dewatermark.ai API key. When provided, the best image per listing '
+             'is sent for watermark removal and uploaded as {id}_clean.jpg.',
+    )
     args = parser.parse_args()
 
     if sys.stdout.encoding != 'utf-8':
@@ -1236,6 +1318,7 @@ examples:
         max_hours=args.hours,
         start_date=args.start_date,
         end_date=args.end_date,
+        dewatermark_key=args.dewatermark_key,
     )
     if args.repair_images:
         scraper._repair_images()

@@ -305,12 +305,40 @@
     "Grand Cherokee SRT",
     "Mighty",
     "Ciaz",
-    "Range Rover Sport SVR"
+    "Range Rover Sport SVR",
+    "Casper",
+    "Sirion",
+    "Centennia",
+    "Indica",
+    "Travel",
+    "Montero Sport",
+    "Indigo",
+    "Wrangler Sport",
+    "Explorer Platinum",
+    "Trax LT",
+    "مقطورات براد",
+    "Stonic",
+    "Twingo",
+    "شاحنات تريلر",
+    "مقطورات سطحة",
+    "Kona N",
+    "HiPhi X",
+    "Rich",
+    "Logan Pick-Up",
+    "Favorit",
+    "Legend",
+    "Labo",
+    "B-Series",
+    "Caravan",
+    "BenBen Mini",
+    "Coupe",
+    "Poer"
   ],
   "origin": [
     "صينية",
     "غير ذلك",
-    "يابانية"
+    "يابانية",
+    "ألمانية"
   ],
   "body_type": [
     "ميني فان",
@@ -359,14 +387,17 @@
     "ألبين",
     "ميني Mini",
     "هونغتشي",
-    "سيهول"
+    "سيهول",
+    "هاي فاي",
+    "دومي"
   ],
   "transmission": [
     "كهربائي",
     "CVT",
     "Multi Mode",
     "Hybrid",
-    "4WD"
+    "4WD",
+    "DCT"
   ],
   "city": [
     "النبك",
@@ -380,7 +411,10 @@
     "شهبا",
     "القامشلي",
     "المعضمية",
-    "منبج"
+    "منبج",
+    "عفرين",
+    "بانياس",
+    "يبرود"
   ],
   "fuel_type": [
     "غير ذلك"

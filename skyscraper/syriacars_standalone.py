@@ -23,13 +23,13 @@ KEY BEHAVIOURS
 • Chapter specs : All h2 chapter sections (مواصفات السيارة, etc.) are parsed
                   in addition to the main spec list.
 
-COLUMNS (in sheet order)
-------------------------
-scraped_at | source | id | category | ad_title | listing_type | condition |
-body_type | brand | model | price | location | year | drive_system |
-transmission | fuel_type | mileage | engine | cylinders | color |
-interior_color | doors | vin | description | seller_name | contact |
-images | image_folder_url
+COLUMNS (in sheet order — syriacars-specific schema)
+-----------------------------------------------------
+id | source | car_url | make | model | year | body_type |
+exterior_color | interior_color | fuel_type | engine_size | transmission |
+condition | city | mileage | price | date_added | views |
+phone | listing_id | seller_name | seller_type | seller_notes |
+images_drive_links | drive_system | image_clean_link
 
 SETUP
 -----
@@ -49,6 +49,7 @@ USAGE
 """
 
 import argparse
+import base64
 import io
 import json
 import logging
@@ -58,6 +59,7 @@ import signal
 import sys
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 import requests
@@ -98,8 +100,8 @@ OAUTH_TOKEN_FILE = os.path.join(SCRIPT_DIR, 'oauth_token.json')
 # Pause/resume progress (used in --full mode)
 PROGRESS_FILE = os.path.join(SCRIPT_DIR, 'syriacars_progress.json')
 
-# Google Sheets — target spreadsheet
-SHEET_ID = '17sJW61R7OetNenqn9gqw0BnRjdF2-ba525ld_xGOofQ'
+# Google Sheets — target spreadsheet (SyriaCarsCleanImages)
+SHEET_ID = '189XTSyzzCaltqY24N1npQ6C-JPhLVxfDBvf3BbPu_LM'
 
 # Google Drive — root folder for car images
 DRIVE_FOLDER_ID = '1m3Ne66uSpwWLFoQHnGgbxBe4DmUE4V2t'
@@ -123,6 +125,16 @@ HEADERS = {
 SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets',
     'https://www.googleapis.com/auth/drive',
+]
+
+# Dewatermark.ai API
+DEWATERMARK_URL = 'https://platform.dewatermark.ai/api/object_removal/v2/erase_watermark'
+
+# Dealer list scraper
+DEALERS_LIST_URL    = f'{BASE_URL}/dealers-list/'
+DEALERS_SHEET_ID_FILE = Path(__file__).parent / 'syriacars_dealers_sheet_id.txt'
+DEALERS_COLUMNS: List[str] = [
+    'dealer_name', 'username', 'profile_url', 'phone', 'city', 'car_count', 'scraped_at',
 ]
 
 # Seconds between HTTP requests (polite crawling)
@@ -174,15 +186,16 @@ COLUMNS: List[str] = [
     'id', 'source', 'car_url',
     'make', 'model', 'year', 'body_type',
     'exterior_color', 'interior_color',
-    'fuel_type', 'engine_size', 'cylinders', 'horsepower',
-    'transmission', 'doors', 'seats', 'steering_side',
-    'origin', 'condition', 'chassis_condition', 'warranty', 'chassis_number',
+    'fuel_type', 'engine_size', 'transmission',
+    'condition',
     'city', 'mileage', 'price',
     'date_added', 'views',
     'phone', 'listing_id',
-    'seller_name', 'seller_type', 'seller_listings',
-    'description_original',
-    'images_original_links', 'images_drive_links',
+    'seller_name', 'seller_type',
+    'seller_notes',
+    'images_drive_links',
+    'drive_system',
+    'image_clean_link',
 ]
 
 # ── OAuth2 helpers ────────────────────────────────────────────────────────────
@@ -271,11 +284,17 @@ def _clean(text: Optional[str]) -> str:
 def _clean_mileage(v: str) -> str:
     """
     Remove Arabic/Latin 'km' suffix and thousands-separators from a mileage string.
+    Handles 'X ألف' (= X thousand) before clean_number strips 'ألف'.
     '150,000 كم' → '150000'
     '75٬000 km'  → '75000'
+    '210 ألف كم' → '210000'
+    '245 ألف'    → '245000'
     """
-    v = re.sub(r'[,،٬]', '', v)                      # remove comma variants
+    v = re.sub(r'[,،٬]', '', v)
     v = re.sub(r'\s*(كم|km)\s*$', '', v, flags=re.I).strip()
+    m = re.match(r'^(\d+)\s*ألف\s*$', v)
+    if m:
+        return str(int(m.group(1)) * 1000)
     return v
 
 
@@ -289,6 +308,42 @@ def _parse_price(text: str) -> Optional[str]:
         return str(int(v)) if v == int(v) else str(v)
     except (ValueError, TypeError):
         return None
+
+
+_HAS_ARABIC = re.compile(r'[؀-ۿ]')
+
+
+_ALL_MODELS_SUFFIX = re.compile(r'\s*كل الفئات\s*$')
+_COMPOUND_SEP      = re.compile(r'\s*[-–]\s*')
+
+
+def _strip_foreign(text: str) -> str:
+    """
+    Syriacars stores many values as 'English - Arabic', 'Arabic - English',
+    or 'Arabic-English' (no spaces around dash). Return just the Arabic portion
+    when both are present; otherwise return as-is.
+    Also strips 'كل الفئات' (= 'all categories') which appears when the site
+    has no specific model selected.
+    Examples:
+        'BMW - بي ام دابليو'  →  'بي ام دابليو'
+        'Rogue - روج'         →  'روج'
+        'روج-Rogue'           →  'روج'
+        'G class كل الفئات'   →  'G class'
+        'كل الفئات'           →  '' (empty — no real value)
+        'G class'             →  'G class'   (no Arabic → keep)
+    """
+    if not text:
+        return text
+    # Strip 'كل الفئات' suffix (site artifact meaning "all models")
+    text = _ALL_MODELS_SUFFIX.sub('', text).strip()
+    if not text:
+        return ''
+    # Split on ' - ' or '-' between Arabic and non-Arabic parts
+    parts = [p.strip() for p in _COMPOUND_SEP.split(text) if p.strip()]
+    if len(parts) < 2:
+        return text
+    arabic_parts = [p for p in parts if _HAS_ARABIC.search(p)]
+    return arabic_parts[0] if arabic_parts else text
 
 
 def _listing_type(title: str) -> str:
@@ -369,10 +424,15 @@ class SyriaCarsScraper:
     """
 
     def __init__(self, full_mode: bool = False, max_hours: Optional[float] = None,
-                 start_date: Optional[str] = None, end_date: Optional[str] = None):
-        self.full_mode  = full_mode
-        self.start_date = start_date  # YYYY-MM-DD — skip listings older than this
-        self.end_date   = end_date    # YYYY-MM-DD — skip listings newer than this
+                 max_pages: Optional[int] = None,
+                 start_date: Optional[str] = None, end_date: Optional[str] = None,
+                 dewatermark_key: Optional[str] = None):
+        self.full_mode       = full_mode
+        self.max_pages       = max_pages        # stop after this many pages
+        self.max_cars        = None             # set via run() kwarg or --max-cars
+        self.start_date      = start_date       # YYYY-MM-DD — skip listings older than this
+        self.end_date        = end_date         # YYYY-MM-DD — skip listings newer than this
+        self.dewatermark_key = dewatermark_key  # dewatermark.ai API key
         self.deadline: Optional[datetime] = (
             datetime.now() + timedelta(hours=max_hours) if max_hours else None
         )
@@ -488,19 +548,12 @@ class SyriaCarsScraper:
         self._make_public(f['id'])
         return f['id'], f.get('webViewLink', '')
 
-    def _upload_image(
-        self, img_url: str, folder_id: str, filename: str
+    def _upload_bytes(
+        self, data: bytes, mime: str, folder_id: str, filename: str
     ) -> Optional[str]:
-        """
-        Download *img_url* and upload it to *folder_id* as *filename*.
-        Returns the Google Drive webViewLink, or None on failure.
-        Files are owned by the OAuth2 user — no storage-quota issues.
-        """
+        """Upload raw bytes to *folder_id*. Returns webViewLink or None."""
         try:
-            r = requests.get(img_url, headers=HEADERS, timeout=30)
-            r.raise_for_status()
-            mime = r.headers.get('Content-Type', 'image/jpeg').split(';')[0]
-            media = MediaIoBaseUpload(io.BytesIO(r.content), mimetype=mime)
+            media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mime)
             f = self.drive.files().create(
                 body={'name': filename, 'parents': [folder_id]},
                 media_body=media,
@@ -509,7 +562,42 @@ class SyriaCarsScraper:
             self._make_public(f['id'])
             return f.get('webViewLink', '')
         except Exception as exc:
-            logger.warning(f'    Image upload failed ({img_url}): {exc}')
+            logger.warning(f'    Drive upload failed ({filename}): {exc}')
+            return None
+
+    def _upload_image(
+        self, img_url: str, folder_id: str, filename: str
+    ) -> Optional[str]:
+        """Download *img_url* and upload to Drive. Returns webViewLink or None."""
+        try:
+            r = requests.get(img_url, headers=HEADERS, timeout=30)
+            r.raise_for_status()
+            mime = r.headers.get('Content-Type', 'image/jpeg').split(';')[0]
+            return self._upload_bytes(r.content, mime, folder_id, filename)
+        except Exception as exc:
+            logger.warning(f'    Image download failed ({img_url}): {exc}')
+            return None
+
+    def _remove_watermark(self, image_bytes: bytes) -> Optional[bytes]:
+        """
+        Send *image_bytes* to dewatermark.ai and return clean image bytes.
+        Returns None on failure.
+        """
+        try:
+            resp = requests.post(
+                DEWATERMARK_URL,
+                headers={'X-API-KEY': self.dewatermark_key},
+                files={'original_preview_image': ('image.jpg', image_bytes, 'image/jpeg')},
+                timeout=60,
+            )
+            resp.raise_for_status()
+            b64 = resp.json().get('edited_image', {}).get('image', '')
+            if not b64:
+                logger.warning('  Dewatermark: empty image in response')
+                return None
+            return base64.b64decode(b64)
+        except Exception as exc:
+            logger.warning(f'  Dewatermark API error: {exc}')
             return None
 
     # ── HTTP fetch ────────────────────────────────────────────────────────────
@@ -678,10 +766,28 @@ class SyriaCarsScraper:
                             data['description_original'] = desc
                     break
 
-        # ── Seller name ───────────────────────────────────────────────────────
-        dealer = soup.select_one('.single-listing-dealer-name')
-        if dealer:
-            data['seller_name'] = _clean(dealer.get_text())
+        # ── Seller notes (ملاحظات البائع) ────────────────────────────────────
+        for h in soup.find_all(['h2', 'h3', 'h4', 'h5'],
+                               string=re.compile(r'ملاحظات|seller.?note', re.I)):
+            nxt = h.find_next_sibling()
+            while nxt and nxt.name in ('br', 'script', 'style'):
+                nxt = nxt.find_next_sibling()
+            if nxt:
+                notes = _clean(nxt.get_text(separator=' '))
+                if notes and notes not in ('غير معروف', 'N/A', 'n/a', '-'):
+                    data['seller_notes'] = notes
+            break
+
+        # ── Seller name + type ────────────────────────────────────────────────
+        # Business listings wrap the seller name in a /dealer/ profile link.
+        dealer_el = soup.select_one('.single-listing-dealer-name')
+        if dealer_el:
+            data['seller_name'] = _clean(dealer_el.get_text())
+            dealer_a = (dealer_el if dealer_el.name == 'a'
+                        else dealer_el.find('a', href=re.compile(r'/dealer/')))
+            data['seller_type'] = 'dealer' if dealer_a else 'private'
+        else:
+            data['seller_type'] = 'private'
 
         # ── Contact ───────────────────────────────────────────────────────────
         # The Motors theme embeds the full phone number directly in the static HTML
@@ -788,14 +894,174 @@ class SyriaCarsScraper:
         except Exception as exc:
             logger.warning(f'Could not sort sheet: {exc}')
 
+    # ── Dealers sheet helpers ─────────────────────────────────────────────────
+
+    def _get_or_create_dealers_sheet(self):
+        """Open the dealers sheet by saved ID, or create a new spreadsheet."""
+        if DEALERS_SHEET_ID_FILE.exists():
+            sheet_id = DEALERS_SHEET_ID_FILE.read_text().strip()
+            try:
+                ws = self.gc.open_by_key(sheet_id).sheet1
+                logger.info(f'Opened existing dealers sheet: {sheet_id}')
+                return ws
+            except Exception as exc:
+                logger.warning(f'Saved dealers sheet ID not usable ({exc}), creating new …')
+
+        sh = self.gc.create('SyriaCarsDealers')
+        sh.share('', perm_type='anyone', role='reader')
+        ws = sh.sheet1
+        ws.update_title('Dealers')
+        ws.append_row(DEALERS_COLUMNS)
+        DEALERS_SHEET_ID_FILE.write_text(sh.id)
+        logger.info(f'Created dealers sheet: {sh.id}  →  {sh.url}')
+        return ws
+
+    def _phones_from_cars_sheet(self) -> Dict[str, str]:
+        """
+        Read the cars sheet and return {seller_name_lower: phone} for every
+        row where seller_type == 'dealer'. Phones collected during normal
+        scraping are reused here so --scrape-dealers never needs extra HTTP calls.
+        """
+        phones: Dict[str, str] = {}
+        try:
+            all_vals = self.sheet.get_all_values()
+            if len(all_vals) < 2:
+                return phones
+            header = all_vals[0]
+            name_col  = header.index('seller_name')  if 'seller_name'  in header else -1
+            phone_col = header.index('phone')         if 'phone'         in header else -1
+            type_col  = header.index('seller_type')  if 'seller_type'  in header else -1
+            if -1 in (name_col, phone_col, type_col):
+                return phones
+            for row in all_vals[1:]:
+                stype = row[type_col] if type_col < len(row) else ''
+                name  = row[name_col]  if name_col  < len(row) else ''
+                phone = row[phone_col] if phone_col < len(row) else ''
+                if stype == 'dealer' and name and phone:
+                    phones[name.lower().strip()] = phone
+        except Exception as exc:
+            logger.warning(f'Could not read dealer phones from cars sheet: {exc}')
+        return phones
+
+    def scrape_dealers(self):
+        """
+        Scrape syriacars.net/dealers-list/ (all pages) to get dealer names and
+        car counts. Phones come from the cars sheet (already collected during
+        normal scraping — no extra HTTP requests needed). Write results to the
+        SyriaCarsDealers Google Sheet (auto-created on first run).
+        """
+        logger.info('=== Dealer scraper ===')
+        dealers: Dict[str, Dict] = {}   # username → info dict
+
+        # ── Phase 1: paginate dealer list ────────────────────────────────────
+        page = 1
+        while True:
+            url = (DEALERS_LIST_URL if page == 1
+                   else f'{DEALERS_LIST_URL}page/{page}/')
+            logger.info(f'  [page {page}] {url}')
+            try:
+                soup = self._fetch(url)
+            except requests.HTTPError as exc:
+                if exc.response.status_code == 404:
+                    break
+                logger.error(f'  HTTP error: {exc}')
+                break
+            except Exception as exc:
+                logger.error(f'  Fetch error: {exc}')
+                break
+
+            # Each dealer has 3 flat <a href="/dealer/username/"> tags:
+            # image link, name text link, car-count text link — no card wrapper class.
+            all_dealer_links = soup.select('a[href*="/dealer/"]')
+            if not all_dealer_links:
+                logger.info('  No /dealer/ links found — stopping.')
+                break
+
+            page_usernames: List[str] = []
+            for a_tag in all_dealer_links:
+                href = a_tag.get('href', '').rstrip('/')
+                if not href:
+                    continue
+                if href.startswith('/'):
+                    href = BASE_URL + href
+                username = href.split('/dealer/')[-1].rstrip('/')
+                if username and username not in dealers and username not in page_usernames:
+                    page_usernames.append(username)
+
+            before = len(dealers)
+            for username in page_usernames:
+                name      = ''
+                car_count = ''
+                for a_tag in soup.select(f'a[href*="/dealer/{username}/"]'):
+                    txt = _clean(a_tag.get_text())
+                    if not txt:
+                        continue
+                    if 'سيارة' in txt:
+                        m = re.search(r'\d+', txt)
+                        if m:
+                            car_count = m.group(0)
+                    elif not name:
+                        name = txt
+
+                dealers[username] = {
+                    'dealer_name': name or username,
+                    'username':    username,
+                    'profile_url': f'{BASE_URL}/dealer/{username}/',
+                    'phone':       '',
+                    'city':        '',
+                    'car_count':   car_count,
+                    'scraped_at':  datetime.now().date().isoformat(),
+                }
+
+            added = len(dealers) - before
+            logger.info(f'  +{added} dealers  (total: {len(dealers)})')
+            if added == 0:
+                break
+            page += 1
+            time.sleep(REQUEST_DELAY)
+
+        logger.info(f'Dealer list scraped: {len(dealers)} dealers.')
+        if not dealers:
+            logger.warning('No dealers found — aborting.')
+            return
+
+        # ── Phase 2: fill phones from cars sheet (zero extra HTTP requests) ──
+        phones = self._phones_from_cars_sheet()
+        matched = 0
+        for d in dealers.values():
+            phone = phones.get(d['dealer_name'].lower().strip(), '')
+            if phone:
+                d['phone'] = phone
+                matched += 1
+        logger.info(f'Phone lookup from cars sheet: {matched}/{len(dealers)} matched.')
+
+        # ── Phase 3: write to dealers sheet ──────────────────────────────────
+        dealers_ws = self._get_or_create_dealers_sheet()
+
+        all_vals = dealers_ws.get_all_values()
+        if len(all_vals) > 1:
+            dealers_ws.delete_rows(2, len(all_vals))
+
+        rows = [[d.get(col, '') for col in DEALERS_COLUMNS]
+                for d in dealers.values()]
+        if rows:
+            dealers_ws.append_rows(rows, value_input_option='RAW')
+
+        logger.info(f'Dealers sheet updated — {len(rows)} rows written.')
+
+        local_json = Path(__file__).parent / 'syriacars_dealers.json'
+        with open(local_json, 'w', encoding='utf-8') as f:
+            json.dump(list(dealers.values()), f, ensure_ascii=False, indent=2)
+        logger.info(f'Saved {local_json}')
+
     # ── Repair-data mode ─────────────────────────────────────────────────────
 
     def repair_data(self):
         """Normalize all existing sheet rows using Sayarti canonical values."""
         logger.info('=== Repair-data mode (normalize all fields) ===')
         NORMALIZABLE = [
-            'price', 'engine_size', 'mileage', 'year', 'seats', 'horsepower',
-            'cylinders', 'doors', 'fuel_type', 'transmission', 'origin',
+            'price', 'engine_size', 'mileage', 'year',
+            'fuel_type', 'transmission',
             'body_type', 'city', 'exterior_color', 'interior_color', 'condition',
             'make', 'model',
         ]
@@ -808,10 +1074,17 @@ class SyriaCarsScraper:
         for row_num, row in enumerate(all_values[1:], start=2):
             raw = {header[i]: row[i] if i < len(row) else '' for i in range(len(header))}
             car_id = raw.get('id', str(row_num))
+            # Snapshot originals before in-place strip so comparison uses sheet values
+            originals = {col: raw.get(col, '') for col in NORMALIZABLE}
+            # Apply syriacars-specific preprocessing before normalization
+            for _f in ('make', 'model', 'body_type', 'fuel_type', 'transmission',
+                       'condition', 'city', 'origin', 'exterior_color', 'interior_color'):
+                if raw.get(_f):
+                    raw[_f] = _strip_foreign(raw[_f])
             normalized = normalize_car(raw)
             updates = {}
             for col in NORMALIZABLE:
-                old = raw.get(col, '')
+                old = originals.get(col, '')
                 new = normalized.get(col, '')
                 if new and new != old:
                     updates[col] = new
@@ -961,26 +1234,49 @@ class SyriaCarsScraper:
 
         image_urls: List[str] = detail.pop('_image_urls', [])
         image_links: List[str] = []
-        folder_url = ''
+        clean_link  = ''
 
         if image_urls:
-            folder_name = f'syriacars_{listing_id}'
+            # Only the first image is used (main listing photo).
+            first_url = image_urls[0]
             try:
-                folder_id, folder_url = self._create_subfolder(folder_name)
-                for idx, img_url in enumerate(image_urls, 1):
-                    ext   = img_url.rsplit('.', 1)[-1].lower() or 'jpg'
-                    fname = f'{listing_id}_{idx:02d}.{ext}'
-                    link  = self._upload_image(img_url, folder_id, fname)
-                    if link:
-                        image_links.append(link)
-                logger.info(
-                    f'  Uploaded {len(image_links)}/{len(image_urls)} images'
-                    f' → {folder_url}'
+                r = requests.get(first_url, headers=HEADERS, timeout=30)
+                r.raise_for_status()
+                mime      = r.headers.get('Content-Type', 'image/jpeg').split(';')[0]
+                img_bytes = r.content
+                ext       = first_url.rsplit('.', 1)[-1].lower() or 'jpg'
+
+                link = self._upload_bytes(
+                    img_bytes, mime, DRIVE_FOLDER_ID, f'{listing_id}.{ext}'
                 )
+                if link:
+                    image_links.append(link)
+                    logger.info(f'  Uploaded 1 image → Drive')
+
+                # ── Watermark removal ─────────────────────────────────────
+                if self.dewatermark_key:
+                    logger.info('  Removing watermark…')
+                    clean_bytes = self._remove_watermark(img_bytes)
+                    if clean_bytes:
+                        clean_link = self._upload_bytes(
+                            clean_bytes, 'image/jpeg',
+                            DRIVE_FOLDER_ID, f'{listing_id}_clean.jpg',
+                        ) or ''
+                        logger.info('  ✓ Clean image uploaded')
+                    else:
+                        logger.warning('  Watermark removal returned no image — skipped')
+
             except Exception as exc:
-                logger.error(f'  Drive error for {listing_id}: {exc}')
+                logger.error(f'  Image error for {listing_id}: {exc}')
 
         detail['images_drive_links'] = ', '.join(image_links)
+        detail['image_clean_link']   = clean_link
+
+        # Strip 'English - Arabic' compound values syriacars puts in make/model
+        for _f in ('make', 'model', 'body_type', 'fuel_type', 'transmission',
+                   'condition', 'city', 'origin', 'exterior_color', 'interior_color'):
+            if detail.get(_f):
+                detail[_f] = _strip_foreign(detail[_f])
 
         # Normalize fields to Sayarti canonical values
         detail = normalize_car(detail)
@@ -1037,6 +1333,9 @@ class SyriaCarsScraper:
 
             # ── Check stop conditions before each new page ─────────────────
             if self._should_stop():
+                break
+            if self.max_pages and page > self.max_pages:
+                logger.info(f'Reached --pages limit ({self.max_pages}) — stopping.')
                 break
 
             # Sort by date descending so page 1 always has the newest listings,
@@ -1132,6 +1431,10 @@ class SyriaCarsScraper:
                 if ok:
                     total_new += 1
                     progress['total_scraped'] += 1
+                    if self.max_cars and total_new >= self.max_cars:
+                        logger.info(f'Reached --max-cars limit ({self.max_cars}) — stopping.')
+                        self._stop_requested = True
+                        break
                 time.sleep(REQUEST_DELAY)
             else:
                 # Completed all cars on this page — advance progress
@@ -1180,6 +1483,14 @@ examples:
         help='Stop gracefully after N hours (e.g. --hours 2)',
     )
     parser.add_argument(
+        '--pages', type=int, default=None, metavar='N',
+        help='Stop after scraping N pages (e.g. --pages 1 for a quick test)',
+    )
+    parser.add_argument(
+        '--max-cars', type=int, default=None, metavar='N',
+        help='Stop after successfully scraping N new cars (e.g. --max-cars 100)',
+    )
+    parser.add_argument(
         '--full', action='store_true',
         help=(
             'Full-scrape mode: resume from the last saved page '
@@ -1197,6 +1508,14 @@ examples:
     parser.add_argument(
         '--repair-data', action='store_true',
         help='Normalize all existing sheet rows to Sayarti canonical values.',
+    )
+    parser.add_argument(
+        '--scrape-dealers', action='store_true',
+        help=(
+            'Scrape syriacars.net/dealers-list/, enrich each dealer with phone '
+            'and city, then write results to the SyriaCarsDealers Google Sheet '
+            '(created automatically on first run).'
+        ),
     )
 
     def _parse_date(s: str) -> str:
@@ -1218,6 +1537,11 @@ examples:
         '--end-date', type=_parse_date, default=None, metavar='DATE',
         help='Only scrape listings up to this date (YYYY-MM-DD or DD-MM-YYYY).',
     )
+    parser.add_argument(
+        '--dewatermark-key', default=None, metavar='KEY',
+        help='dewatermark.ai API key. When provided, the best image per listing '
+             'is sent for watermark removal and uploaded as {id}_clean.jpg.',
+    )
     args = parser.parse_args()
 
     if sys.stdout.encoding != 'utf-8':
@@ -1234,10 +1558,15 @@ examples:
     scraper = SyriaCarsScraper(
         full_mode=args.full,
         max_hours=args.hours,
+        max_pages=args.pages,
         start_date=args.start_date,
         end_date=args.end_date,
+        dewatermark_key=args.dewatermark_key,
     )
-    if args.repair_images:
+    scraper.max_cars = args.max_cars
+    if args.scrape_dealers:
+        scraper.scrape_dealers()
+    elif args.repair_images:
         scraper._repair_images()
     elif args.repair_data:
         scraper.repair_data()

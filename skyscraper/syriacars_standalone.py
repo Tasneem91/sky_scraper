@@ -429,6 +429,7 @@ class SyriaCarsScraper:
                  dewatermark_key: Optional[str] = None):
         self.full_mode       = full_mode
         self.max_pages       = max_pages        # stop after this many pages
+        self.max_cars        = None             # set via run() kwarg or --max-cars
         self.start_date      = start_date       # YYYY-MM-DD — skip listings older than this
         self.end_date        = end_date         # YYYY-MM-DD — skip listings newer than this
         self.dewatermark_key = dewatermark_key  # dewatermark.ai API key
@@ -1234,62 +1235,39 @@ class SyriaCarsScraper:
         image_urls: List[str] = detail.pop('_image_urls', [])
         image_links: List[str] = []
         clean_link  = ''
-        folder_url  = ''
 
         if image_urls:
-            folder_name = f'syriacars_{listing_id}'
+            # Only the first image is used (main listing photo).
+            first_url = image_urls[0]
             try:
-                folder_id, folder_url = self._create_subfolder(folder_name)
+                r = requests.get(first_url, headers=HEADERS, timeout=30)
+                r.raise_for_status()
+                mime      = r.headers.get('Content-Type', 'image/jpeg').split(';')[0]
+                img_bytes = r.content
+                ext       = first_url.rsplit('.', 1)[-1].lower() or 'jpg'
 
-                # ── Download all images once ──────────────────────────────
-                downloaded: List[Tuple[str, Optional[bytes], str]] = []
-                for img_url in image_urls:
-                    try:
-                        r = requests.get(img_url, headers=HEADERS, timeout=30)
-                        r.raise_for_status()
-                        mime = r.headers.get('Content-Type', 'image/jpeg').split(';')[0]
-                        downloaded.append((img_url, r.content, mime))
-                    except Exception as exc:
-                        logger.warning(f'    Download failed ({img_url[-60:]}): {exc}')
-                        downloaded.append((img_url, None, 'image/jpeg'))
+                link = self._upload_bytes(
+                    img_bytes, mime, DRIVE_FOLDER_ID, f'{listing_id}.{ext}'
+                )
+                if link:
+                    image_links.append(link)
+                    logger.info(f'  Uploaded 1 image → Drive')
 
-                # ── Pick best image (first image = main listing photo) ────
-                best_idx  = 0
-                best_size = len(downloaded[0][1]) if downloaded and downloaded[0][1] else 0
-
-                # ── Upload all originals to Drive ─────────────────────────
-                for idx, (img_url, img_bytes, mime) in enumerate(downloaded, 1):
-                    if img_bytes is None:
-                        continue
-                    ext = img_url.rsplit('.', 1)[-1].lower() or 'jpg'
-                    fname = f'{listing_id}_{idx:02d}.{ext}'
-                    link = self._upload_bytes(img_bytes, mime, folder_id, fname)
-                    if link:
-                        image_links.append(link)
-
-                # ── Watermark removal on best image ───────────────────────
-                if self.dewatermark_key and downloaded and downloaded[best_idx][1]:
-                    best_bytes = downloaded[best_idx][1]
-                    logger.info(
-                        f'  Removing watermark from image {best_idx + 1}'
-                        f' ({best_size // 1024} KB)…'
-                    )
-                    clean_bytes = self._remove_watermark(best_bytes)
+                # ── Watermark removal ─────────────────────────────────────
+                if self.dewatermark_key:
+                    logger.info('  Removing watermark…')
+                    clean_bytes = self._remove_watermark(img_bytes)
                     if clean_bytes:
                         clean_link = self._upload_bytes(
                             clean_bytes, 'image/jpeg',
-                            folder_id, f'{listing_id}_clean.jpg',
+                            DRIVE_FOLDER_ID, f'{listing_id}_clean.jpg',
                         ) or ''
                         logger.info('  ✓ Clean image uploaded')
                     else:
                         logger.warning('  Watermark removal returned no image — skipped')
 
-                logger.info(
-                    f'  Uploaded {len(image_links)}/{len(image_urls)} images'
-                    f' → {folder_url}'
-                )
             except Exception as exc:
-                logger.error(f'  Drive error for {listing_id}: {exc}')
+                logger.error(f'  Image error for {listing_id}: {exc}')
 
         detail['images_drive_links'] = ', '.join(image_links)
         detail['image_clean_link']   = clean_link
@@ -1453,6 +1431,10 @@ class SyriaCarsScraper:
                 if ok:
                     total_new += 1
                     progress['total_scraped'] += 1
+                    if self.max_cars and total_new >= self.max_cars:
+                        logger.info(f'Reached --max-cars limit ({self.max_cars}) — stopping.')
+                        self._stop_requested = True
+                        break
                 time.sleep(REQUEST_DELAY)
             else:
                 # Completed all cars on this page — advance progress
@@ -1503,6 +1485,10 @@ examples:
     parser.add_argument(
         '--pages', type=int, default=None, metavar='N',
         help='Stop after scraping N pages (e.g. --pages 1 for a quick test)',
+    )
+    parser.add_argument(
+        '--max-cars', type=int, default=None, metavar='N',
+        help='Stop after successfully scraping N new cars (e.g. --max-cars 100)',
     )
     parser.add_argument(
         '--full', action='store_true',
@@ -1577,6 +1563,7 @@ examples:
         end_date=args.end_date,
         dewatermark_key=args.dewatermark_key,
     )
+    scraper.max_cars = args.max_cars
     if args.scrape_dealers:
         scraper.scrape_dealers()
     elif args.repair_images:

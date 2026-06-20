@@ -64,6 +64,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import requests
 from bs4 import BeautifulSoup
+from PIL import Image
 
 import gspread
 from google.auth.transport.requests import Request
@@ -1216,6 +1217,48 @@ class SyriaCarsScraper:
 
     # ── Per-car orchestration ─────────────────────────────────────────────────
 
+    # Any field in this set containing "غير معروف" causes the listing to be skipped.
+    _QUALITY_FIELDS = (
+        'make', 'model', 'year', 'price', 'city',
+        'body_type', 'fuel_type', 'transmission', 'condition', 'mileage',
+    )
+
+    def _passes_quality_check(self, detail: Dict) -> bool:
+        """Return False if any quality field has the value غير معروف."""
+        for f in self._QUALITY_FIELDS:
+            if str(detail.get(f, '')).strip() == 'غير معروف':
+                logger.info(f'  ✗ Quality skip — "{f}" = غير معروف')
+                return False
+        return True
+
+    def _is_exterior_car_image(self, img_bytes: bytes, mime: str = 'image/jpeg') -> bool:
+        """
+        Return True if the image likely shows the full exterior of a car.
+
+        Two free heuristics using Pillow:
+        1. Aspect ratio — portrait images (h > w) are rarely full exterior shots.
+        2. Average brightness — very dark images are typically engine bays or interiors.
+        """
+        try:
+            img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
+            w, h = img.size
+
+            # Portrait or near-square → unlikely to be a full exterior shot
+            if h > w * 0.95:
+                return False
+
+            # Very dark on average → engine bay, dark interior, etc.
+            small = img.resize((50, 50))
+            pixels = list(small.getdata())
+            avg_brightness = sum(r + g + b for r, g, b in pixels) / (len(pixels) * 3)
+            if avg_brightness < 55:
+                return False
+
+            return True
+        except Exception as exc:
+            logger.warning(f'  Image heuristic failed: {exc} — treating as exterior')
+            return True
+
     def _process_car(self, listing_id: str, car_url: str, date_added: str = '') -> bool:
         """
         Scrape one car detail page, upload images, write to sheet.
@@ -1232,45 +1275,8 @@ class SyriaCarsScraper:
             detail['date_added'] = date_added   # listing-page date takes priority
         # else: _scrape_detail already set date_added from the detail page meta
 
+        # Save image URLs before quality check (popped so they don't land in sheet)
         image_urls: List[str] = detail.pop('_image_urls', [])
-        image_links: List[str] = []
-        clean_link  = ''
-
-        if image_urls:
-            # Only the first image is used (main listing photo).
-            first_url = image_urls[0]
-            try:
-                r = requests.get(first_url, headers=HEADERS, timeout=30)
-                r.raise_for_status()
-                mime      = r.headers.get('Content-Type', 'image/jpeg').split(';')[0]
-                img_bytes = r.content
-                ext       = first_url.rsplit('.', 1)[-1].lower() or 'jpg'
-
-                link = self._upload_bytes(
-                    img_bytes, mime, DRIVE_FOLDER_ID, f'{listing_id}.{ext}'
-                )
-                if link:
-                    image_links.append(link)
-                    logger.info(f'  Uploaded 1 image → Drive')
-
-                # ── Watermark removal ─────────────────────────────────────
-                if self.dewatermark_key:
-                    logger.info('  Removing watermark…')
-                    clean_bytes = self._remove_watermark(img_bytes)
-                    if clean_bytes:
-                        clean_link = self._upload_bytes(
-                            clean_bytes, 'image/jpeg',
-                            DRIVE_FOLDER_ID, f'{listing_id}_clean.jpg',
-                        ) or ''
-                        logger.info('  ✓ Clean image uploaded')
-                    else:
-                        logger.warning('  Watermark removal returned no image — skipped')
-
-            except Exception as exc:
-                logger.error(f'  Image error for {listing_id}: {exc}')
-
-        detail['images_drive_links'] = ', '.join(image_links)
-        detail['image_clean_link']   = clean_link
 
         # Strip 'English - Arabic' compound values syriacars puts in make/model
         for _f in ('make', 'model', 'body_type', 'fuel_type', 'transmission',
@@ -1280,6 +1286,80 @@ class SyriaCarsScraper:
 
         # Normalize fields to Sayarti canonical values
         detail = normalize_car(detail)
+
+        # ── Quality gate — skip sparse listings before spending image/API credits ──
+        if not self._passes_quality_check(detail):
+            return False
+
+        image_links: List[str] = []
+        clean_link  = ''
+
+        if image_urls:
+            # Pick the first image that shows the full exterior of the car.
+            # If vision check is enabled, try each image in order until one passes.
+            selected_bytes: Optional[bytes] = None
+            selected_mime  = 'image/jpeg'
+            selected_ext   = 'jpg'
+
+            for idx, img_url in enumerate(image_urls):
+                try:
+                    r = requests.get(img_url, headers=HEADERS, timeout=30)
+                    r.raise_for_status()
+                    mime_try  = r.headers.get('Content-Type', 'image/jpeg').split(';')[0]
+                    bytes_try = r.content
+                    ext_try   = img_url.rsplit('.', 1)[-1].lower() or 'jpg'
+
+                    if self._is_exterior_car_image(bytes_try, mime_try):
+                        selected_bytes = bytes_try
+                        selected_mime  = mime_try
+                        selected_ext   = ext_try
+                        if idx > 0:
+                            logger.info(f'  Image #{idx+1} chosen as exterior shot (first {idx} skipped)')
+                        break
+                    else:
+                        logger.info(f'  Image #{idx+1} is not a full exterior — trying next')
+                except Exception as exc:
+                    logger.warning(f'  Could not fetch image #{idx+1} ({img_url}): {exc}')
+
+            # Fall back to first image if none passed the exterior check
+            if selected_bytes is None and image_urls:
+                try:
+                    r = requests.get(image_urls[0], headers=HEADERS, timeout=30)
+                    r.raise_for_status()
+                    selected_mime  = r.headers.get('Content-Type', 'image/jpeg').split(';')[0]
+                    selected_bytes = r.content
+                    selected_ext   = image_urls[0].rsplit('.', 1)[-1].lower() or 'jpg'
+                    logger.warning('  No exterior image found — falling back to first image')
+                except Exception as exc:
+                    logger.error(f'  Image error for {listing_id}: {exc}')
+
+            if selected_bytes:
+                try:
+                    link = self._upload_bytes(
+                        selected_bytes, selected_mime, DRIVE_FOLDER_ID,
+                        f'{listing_id}.{selected_ext}'
+                    )
+                    if link:
+                        image_links.append(link)
+                        logger.info('  Uploaded 1 image → Drive')
+
+                    # ── Watermark removal ─────────────────────────────────────
+                    if self.dewatermark_key:
+                        logger.info('  Removing watermark…')
+                        clean_bytes = self._remove_watermark(selected_bytes)
+                        if clean_bytes:
+                            clean_link = self._upload_bytes(
+                                clean_bytes, 'image/jpeg',
+                                DRIVE_FOLDER_ID, f'{listing_id}_clean.jpg',
+                            ) or ''
+                            logger.info('  ✓ Clean image uploaded')
+                        else:
+                            logger.warning('  Watermark removal returned no image — skipped')
+                except Exception as exc:
+                    logger.error(f'  Image error for {listing_id}: {exc}')
+
+        detail['images_drive_links'] = ', '.join(image_links)
+        detail['image_clean_link']   = clean_link
 
         try:
             self._append_row(detail)

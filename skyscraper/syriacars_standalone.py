@@ -1217,18 +1217,45 @@ class SyriaCarsScraper:
 
     # ── Per-car orchestration ─────────────────────────────────────────────────
 
-    # Any field in this set containing "غير معروف" causes the listing to be skipped.
+    # All of these must be non-empty and not "غير معروف" to pass the quality gate.
     _QUALITY_FIELDS = (
-        'make', 'model', 'year', 'price', 'city',
-        'body_type', 'fuel_type', 'transmission', 'condition', 'mileage',
+        'make', 'model', 'year', 'body_type',
+        'exterior_color', 'interior_color', 'fuel_type', 'engine_size',
+        'transmission', 'condition', 'city', 'mileage', 'price',
+        'phone', 'seller_name',
     )
+    _BAD_VALUES = {'غير معروف', 'n/a', 'N/A', '-', 'none', 'None'}
 
-    def _passes_quality_check(self, detail: Dict) -> bool:
-        """Return False if any quality field has the value غير معروف."""
+    def _passes_quality_check(self, detail: Dict, image_urls: List[str]) -> bool:
+        """
+        Return False if the listing is not worth spending image/dewatermark credits on.
+
+        Rules:
+        - Every field in _QUALITY_FIELDS must be non-empty and not a known bad value.
+        - price must be numeric and > 1.
+        - At least one image URL must be available.
+        """
         for f in self._QUALITY_FIELDS:
-            if str(detail.get(f, '')).strip() == 'غير معروف':
-                logger.info(f'  ✗ Quality skip — "{f}" = غير معروف')
+            v = str(detail.get(f, '')).strip()
+            if not v or v in self._BAD_VALUES:
+                logger.info(f'  ✗ Quality skip — "{f}" is empty or unknown ("{v}")')
                 return False
+
+        # Price must be a real number greater than 1
+        price_str = re.sub(r'[^\d.]', '', str(detail.get('price', '')))
+        try:
+            if not price_str or float(price_str) <= 1:
+                logger.info(f'  ✗ Quality skip — price "{detail.get("price")}" is not a valid price')
+                return False
+        except ValueError:
+            logger.info(f'  ✗ Quality skip — price "{detail.get("price")}" is not numeric')
+            return False
+
+        # Must have at least one image to upload / dewatermark
+        if not image_urls:
+            logger.info('  ✗ Quality skip — no images available')
+            return False
+
         return True
 
     def _is_exterior_car_image(self, img_bytes: bytes, mime: str = 'image/jpeg') -> bool:
@@ -1288,7 +1315,7 @@ class SyriaCarsScraper:
         detail = normalize_car(detail)
 
         # ── Quality gate — skip sparse listings before spending image/API credits ──
-        if not self._passes_quality_check(detail):
+        if not self._passes_quality_check(detail, image_urls):
             return False
 
         image_links: List[str] = []

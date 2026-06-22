@@ -37,6 +37,7 @@ from typing import Any, Dict, List, Optional, Set
 from urllib.parse import urlencode, urlparse, parse_qs, urlunparse
 
 import requests as req_lib
+from bs4 import BeautifulSoup
 
 import gspread
 from google.auth.transport.requests import Request
@@ -723,6 +724,118 @@ class DamazzleRawScraper:
             logger.error(f'  Direct API error: {exc}')
             return [], None
 
+    # ── BS4 detail fetcher (SSR endpoint) ────────────────────────────────────
+
+    def _requests_detail(self, slug: str) -> Dict:
+        """
+        Fetch https://damazzle.com/ads/{slug} with plain requests + BeautifulSoup.
+        The /ads/ endpoint is server-side rendered — no Playwright needed.
+        Returns a dom dict with: specs_raw, phone, seller_name, description, images.
+        """
+        # The /ads/ URL uses just the final slug segment (no make/date prefix)
+        ad_slug = slug.split('/')[-1] if '/' in slug else slug
+        url = f'https://damazzle.com/ads/{ad_slug}'
+        dom: Dict = {}
+        try:
+            resp = self.http.get(url, timeout=20)
+            if resp.status_code != 200:
+                logger.debug(f'  BS4 detail {url}: HTTP {resp.status_code}')
+                return dom
+            soup = BeautifulSoup(resp.text, 'html.parser')
+
+            # ── Phone ────────────────────────────────────────────────────────
+            tel = soup.find('a', href=lambda h: h and h.startswith('tel:'))
+            if tel:
+                dom['phone'] = tel['href'].replace('tel:', '').strip()
+            if not dom.get('phone'):
+                wa = soup.find('a', href=lambda h: h and 'wa.me' in (h or ''))
+                if wa:
+                    m = re.search(r'wa\.me/(\+?[\d]+)', wa['href'])
+                    if m:
+                        dom['phone'] = m.group(1)
+
+            # ── Seller name ──────────────────────────────────────────────────
+            sinfo = soup.find(class_='sideauthor-info')
+            if sinfo:
+                for tag in sinfo.find_all('p'):
+                    txt = tag.get_text(strip=True)
+                    if txt and len(txt) > 1 and 'Join' not in txt and 'نشر' not in txt:
+                        dom['seller_name'] = txt
+                        break
+            if not dom.get('seller_name'):
+                for a in soup.find_all('a', href=lambda h: h and '/seller/' in (h or '')):
+                    p = a.find('p', class_=lambda c: c and 'fw-bold' in c.split())
+                    if not p:
+                        p = a.find('p')
+                    if p:
+                        txt = p.get_text(strip=True)
+                        if txt and len(txt) > 1 and 'نشر' not in txt:
+                            dom['seller_name'] = txt
+                            break
+
+            # ── Specs ────────────────────────────────────────────────────────
+            specs: Dict = {}
+
+            # Strategy A: Damazzle Angular .col-6.col-md-4 + sibling .col-6.col-md-8
+            for label_div in soup.find_all(
+                'div',
+                class_=lambda c: c and 'col-6' in c.split() and 'col-md-4' in c.split()
+                                  and 'text-muted' in c.split()
+            ):
+                p = label_div.find('p')
+                if not p:
+                    continue
+                label = p.get_text(strip=True)
+                val_div = label_div.find_next_sibling('div')
+                if not val_div:
+                    continue
+                val = val_div.get_text(strip=True)
+                if label and val:
+                    specs[label] = val
+
+            # Strategy B: <dl> / <dt> + <dd>
+            for dl in soup.find_all('dl'):
+                for dt, dd in zip(dl.find_all('dt'), dl.find_all('dd')):
+                    k, v = dt.get_text(strip=True), dd.get_text(strip=True)
+                    if k and v:
+                        specs.setdefault(k, v)
+
+            # Strategy C: <table> two-cell rows
+            for table in soup.find_all('table'):
+                for row in table.find_all('tr'):
+                    cells = row.find_all(['td', 'th'])
+                    if len(cells) >= 2:
+                        k, v = cells[0].get_text(strip=True), cells[1].get_text(strip=True)
+                        if k and v and k != v:
+                            specs.setdefault(k, v)
+
+            if specs:
+                dom['specs_raw'] = specs
+                logger.debug(f'  BS4 specs ({ad_slug}): {specs}')
+
+            # ── Images ───────────────────────────────────────────────────────
+            skip_kw = ('icon', 'logo', 'placeholder', 'avatar', 'flag', 'sprite')
+            imgs = []
+            for img in soup.find_all('img'):
+                src = (img.get('src') or img.get('data-src') or '').strip()
+                if src.startswith('http') and not any(k in src.lower() for k in skip_kw):
+                    imgs.append(src)
+            if imgs:
+                dom['images'] = list(dict.fromkeys(imgs))
+
+            # ── Description ──────────────────────────────────────────────────
+            for heading in soup.find_all(['h2', 'h3', 'h4']):
+                if any(kw in heading.get_text() for kw in ('وصف', 'تفاصيل', 'ملاحظات')):
+                    desc_el = heading.find_next(['div', 'p', 'section'])
+                    if desc_el:
+                        dom['description'] = desc_el.get_text(separator=' ', strip=True)
+                    break
+
+        except Exception as exc:
+            logger.error(f'  BS4 detail error ({url}): {exc}')
+
+        return dom
+
     # ── Car processing ────────────────────────────────────────────────────────
 
     def _process_car(self, c: Dict, detail: Optional[Dict], dom: Dict) -> bool:
@@ -748,15 +861,20 @@ class DamazzleRawScraper:
             logger.error(f'  Parse error ({car_id}): {exc}')
             return False
 
-        # Merge DOM-extracted fields as fallbacks
+        # Merge DOM / BS4-extracted fields as fallbacks
         if dom.get('phone') and not data.get('phone'):
             data['phone'] = dom['phone']
         if dom.get('seller_name') and not data.get('seller_name'):
             data['seller_name'] = dom['seller_name']
         if dom.get('price') and not data.get('price'):
             data['price'] = dom['price']
+        if dom.get('description') and not data.get('description'):
+            data['description'] = dom['description']
+        if dom.get('images') and not data.get('image_urls'):
+            data['image_urls']  = dom['images']
+            data['image_count'] = len(dom['images'])
 
-        # Apply DOM-extracted spec pairs (Arabic label → field) as fallbacks
+        # Apply spec pairs from BS4 / DOM via LABEL_MAP
         for arabic_label, raw_value in (dom.get('specs_raw') or {}).items():
             field = LABEL_MAP.get(arabic_label.strip())
             if field and not data.get(field):
@@ -886,8 +1004,11 @@ class DamazzleRawScraper:
 
                     detail, dom = None, {}
                     if slug:
-                        car_url        = f'{SITE_URL}/motors/cars/{slug}'
-                        detail, dom    = await self._playwright_detail_page(bpage, car_url)
+                        # Use requests+BS4 on the SSR /ads/ endpoint (much faster + reliable)
+                        loop = asyncio.get_event_loop()
+                        dom  = await loop.run_in_executor(
+                            None, self._requests_detail, slug
+                        )
                         await asyncio.sleep(REQUEST_DELAY)
 
                     ok = self._process_car(it, detail, dom)

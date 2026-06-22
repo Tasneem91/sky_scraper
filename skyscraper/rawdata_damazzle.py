@@ -130,26 +130,36 @@ SLUG_MAP: Dict[str, str] = {
 }
 
 LABEL_MAP: Dict[str, str] = {
-    'الكيلومتراج':   'mileage',
-    'السنة':         'year',
-    'اللون الخارجي': 'exterior_color',
-    'اللون الداخلي': 'interior_color',
-    'الوقود':        'fuel_type',
-    'ناقل الحركة':   'transmission',
-    'الغيار':        'transmission',
-    'الحالة':        'condition',
-    'المحرك':        'engine_size',
-    'نوع الجسم':     'body_type',
-    'نظام الدفع':    'drive_system',
-    'الأبواب':       'doors',
-    'السلندرات':     'cylinders',
-    'رقم الهيكل':    'chassis_number',
-    'الضمان':        'warranty',
-    'حالة الهيكل':   'chassis_condition',
-    'قوة الحصان':    'horsepower',
-    'المقاعد':       'seats',
-    'جهة القيادة':   'steering_side',
-    'الوارد':        'origin',
+    # Labels as they appear in the API attribute name_ar
+    'الكيلومتراج':        'mileage',
+    'المسافة المقطوعة':   'mileage',   # shown on page
+    'السنة':              'year',
+    'سنة الصنع':          'year',       # shown on page
+    'اللون الخارجي':      'exterior_color',
+    'اللون':              'exterior_color',  # shown on page (short form)
+    'اللون الداخلي':      'interior_color',
+    'الوقود':             'fuel_type',
+    'نوع الوقود':         'fuel_type',   # shown on page
+    'ناقل الحركة':        'transmission',
+    'الغيار':             'transmission',
+    'الحالة':             'condition',
+    'الشروط':             'condition',   # shown on page
+    'المحرك':             'engine_size',
+    'نوع الجسم':          'body_type',
+    'نظام الدفع':         'drive_system',
+    'نوع الدفع':          'drive_system',
+    'الأبواب':            'doors',
+    'عدد الأبواب':        'doors',
+    'السلندرات':          'cylinders',
+    'عدد السلندرات':      'cylinders',
+    'رقم الهيكل':         'chassis_number',
+    'الضمان':             'warranty',
+    'حالة الهيكل':        'chassis_condition',
+    'قوة الحصان':         'horsepower',
+    'المقاعد':            'seats',
+    'عدد المقاعد':        'seats',      # shown on page
+    'جهة القيادة':        'steering_side',
+    'الوارد':             'origin',
 }
 
 COND_MAP  = {'used': 'مستعمل', 'new': 'جديد', 'damaged': 'متضرر'}
@@ -566,8 +576,12 @@ class DamazzleRawScraper:
 
     async def _playwright_detail_page(
         self, page: Page, car_url: str
-    ) -> Optional[Dict]:
-        """Navigate to car detail page; return the single-car JSON response."""
+    ) -> tuple[Optional[Dict], Dict]:
+        """
+        Navigate to car detail page.
+        Returns (api_response, dom_data) where dom_data has phone, seller_name etc.
+        extracted directly from the rendered HTML (more reliable than API for contacts).
+        """
         captured: Optional[Dict] = None
 
         async def on_response(resp: Response):
@@ -576,15 +590,13 @@ class DamazzleRawScraper:
                 return
             if 'json' not in resp.headers.get('content-type', ''):
                 return
-            # Skip search/category/list endpoints
             url_lower = resp.url.lower()
-            if any(x in url_lower for x in ('search', 'categor', 'storage')):
+            if any(x in url_lower for x in ('search', 'categor', 'storage', 'static')):
                 return
             try:
                 body = await resp.json()
             except Exception:
                 return
-            # Accept only dict responses where data is a dict (single car)
             if not isinstance(body, dict):
                 return
             data_val = body.get('data')
@@ -607,7 +619,64 @@ class DamazzleRawScraper:
             except Exception as exc:
                 logger.error(f'  Detail page error: {exc}')
         page.remove_listener('response', on_response)
-        return captured
+
+        # ── Extract from rendered DOM ────────────────────────────────────────
+        dom: Dict = {}
+        try:
+            # Phone from tel: link (the "اتصل الآن" button)
+            for sel in ['a[href^="tel:"]', 'a[href*="tel:"]']:
+                els = await page.query_selector_all(sel)
+                for el in els:
+                    href = (await el.get_attribute('href') or '').strip()
+                    if href.startswith('tel:'):
+                        dom['phone'] = href.replace('tel:', '').strip()
+                        break
+                if dom.get('phone'):
+                    break
+
+            # WhatsApp number as fallback phone
+            if not dom.get('phone'):
+                for el in await page.query_selector_all('a[href*="wa.me"]'):
+                    href = await el.get_attribute('href') or ''
+                    m = re.search(r'wa\.me/(\+?[\d]+)', href)
+                    if m:
+                        dom['phone'] = m.group(1)
+                        break
+
+            # Seller name — try common patterns
+            for sel in [
+                '.seller-name', '[class*="seller"] h', '[class*="dealer"] h',
+                '[class*="user-name"]', '[class*="username"]',
+                'a[href*="/user/"] span', 'a[href*="/seller/"] span',
+            ]:
+                try:
+                    el = await page.query_selector(sel)
+                    if el:
+                        txt = (await el.inner_text()).strip()
+                        if txt and len(txt) > 1:
+                            dom['seller_name'] = txt
+                            break
+                except Exception:
+                    pass
+
+            # Price (sometimes only in DOM)
+            if not dom.get('price'):
+                for sel in ['[class*="price"]', '[class*="Price"]']:
+                    try:
+                        el = await page.query_selector(sel)
+                        if el:
+                            txt = (await el.inner_text()).strip()
+                            digits = re.sub(r'[^\d.]', '', txt.replace(',', ''))
+                            if digits:
+                                dom['price'] = digits
+                                break
+                    except Exception:
+                        pass
+
+        except Exception as exc:
+            logger.debug(f'  DOM extraction error: {exc}')
+
+        return captured, dom
 
     # ── Direct HTTP helper (once URL is known) ────────────────────────────────
 
@@ -629,7 +698,7 @@ class DamazzleRawScraper:
 
     # ── Car processing ────────────────────────────────────────────────────────
 
-    def _process_car(self, c: Dict, detail: Optional[Dict]) -> bool:
+    def _process_car(self, c: Dict, detail: Optional[Dict], dom: Dict) -> bool:
         lid    = str(c.get('id', '') or c.get('_id', '') or '').strip()
         slug   = str(c.get('slug', '') or '').strip()
         car_id = f'damazzle_{lid}' if lid else f'damazzle_{slug}'
@@ -637,7 +706,6 @@ class DamazzleRawScraper:
         if car_id in self.existing_ids:
             return False
 
-        # Date filter check
         date_added = _parse_date(
             c.get('createdAt') or c.get('created_at') or c.get('published_date', '')
         )
@@ -653,11 +721,19 @@ class DamazzleRawScraper:
             logger.error(f'  Parse error ({car_id}): {exc}')
             return False
 
+        # Merge DOM-extracted fields (phone, seller_name, price) as fallbacks
+        if dom.get('phone') and not data.get('phone'):
+            data['phone'] = dom['phone']
+        if dom.get('seller_name') and not data.get('seller_name'):
+            data['seller_name'] = dom['seller_name']
+        if dom.get('price') and not data.get('price'):
+            data['price'] = dom['price']
+
         try:
             self._sheet_append(data)
             _append_jsonl(data)
             self.existing_ids.add(car_id)
-            logger.info(f'  ✓  {data.get("ad_title", car_id)!r}')
+            logger.info(f'  ✓  {data.get("ad_title", car_id)!r}  phone={data.get("phone","-")}')
             return True
         except Exception as exc:
             logger.error(f'  Write failed: {exc}')
@@ -775,13 +851,13 @@ class DamazzleRawScraper:
                     lid  = str(it.get('id',   '') or '').strip()
                     logger.info(f'  → {slug or lid}')
 
-                    detail = None
+                    detail, dom = None, {}
                     if slug:
-                        car_url = f'{SITE_URL}/motors/cars/{slug}'
-                        detail  = await self._playwright_detail_page(bpage, car_url)
+                        car_url        = f'{SITE_URL}/motors/cars/{slug}'
+                        detail, dom    = await self._playwright_detail_page(bpage, car_url)
                         await asyncio.sleep(REQUEST_DELAY)
 
-                    ok = self._process_car(it, detail)
+                    ok = self._process_car(it, detail, dom)
                     if ok:
                         total_new += 1
                         progress['total_scraped'] += 1

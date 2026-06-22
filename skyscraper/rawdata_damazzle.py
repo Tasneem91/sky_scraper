@@ -624,7 +624,7 @@ class DamazzleRawScraper:
         dom: Dict = {}
         try:
             # Phone from tel: link (the "اتصل الآن" button)
-            for sel in ['a[href^="tel:"]', 'a[href*="tel:"]']:
+            for sel in ['a.btn-call[href^="tel:"]', 'a[href^="tel:"]', 'a[href*="tel:"]']:
                 els = await page.query_selector_all(sel)
                 for el in els:
                     href = (await el.get_attribute('href') or '').strip()
@@ -643,21 +643,48 @@ class DamazzleRawScraper:
                         dom['phone'] = m.group(1)
                         break
 
-            # Seller name — try common patterns
+            # Seller name — Damazzle uses .sideauthor-info p.fw-bold
             for sel in [
-                '.seller-name', '[class*="seller"] h', '[class*="dealer"] h',
-                '[class*="user-name"]', '[class*="username"]',
-                'a[href*="/user/"] span', 'a[href*="/seller/"] span',
+                '.sideauthor-info p.fw-bold',
+                '.sideauthor-info .fw-bold',
+                '.sideauthor-info p',
+                'a[href*="/seller/"] .fw-bold',
+                'a[href*="/seller/"] p',
             ]:
                 try:
                     el = await page.query_selector(sel)
                     if el:
                         txt = (await el.inner_text()).strip()
-                        if txt and len(txt) > 1:
+                        if txt and len(txt) > 1 and 'نشر' not in txt and 'Joined' not in txt:
                             dom['seller_name'] = txt
                             break
                 except Exception:
                     pass
+
+            # Spec key-value pairs from rendered DOM
+            # Structure: .col-6.col-md-4 (has <p> label) + sibling .col-6.col-md-8 (value)
+            try:
+                specs_raw: Dict = await page.evaluate("""() => {
+                    const result = {};
+                    const labelDivs = document.querySelectorAll(
+                        '.col-6.col-md-4.text-muted.fw-bold'
+                    );
+                    for (const div of labelDivs) {
+                        const p = div.querySelector('p');
+                        if (!p) continue;
+                        const label = p.textContent.trim();
+                        const valueDiv = div.nextElementSibling;
+                        if (!valueDiv) continue;
+                        const value = valueDiv.textContent.trim();
+                        if (label && value) result[label] = value;
+                    }
+                    return result;
+                }""")
+                if isinstance(specs_raw, dict) and specs_raw:
+                    dom['specs_raw'] = specs_raw
+                    logger.debug(f'  DOM specs: {specs_raw}')
+            except Exception as exc:
+                logger.debug(f'  DOM spec extraction error: {exc}')
 
             # Price (sometimes only in DOM)
             if not dom.get('price'):
@@ -721,13 +748,19 @@ class DamazzleRawScraper:
             logger.error(f'  Parse error ({car_id}): {exc}')
             return False
 
-        # Merge DOM-extracted fields (phone, seller_name, price) as fallbacks
+        # Merge DOM-extracted fields as fallbacks
         if dom.get('phone') and not data.get('phone'):
             data['phone'] = dom['phone']
         if dom.get('seller_name') and not data.get('seller_name'):
             data['seller_name'] = dom['seller_name']
         if dom.get('price') and not data.get('price'):
             data['price'] = dom['price']
+
+        # Apply DOM-extracted spec pairs (Arabic label → field) as fallbacks
+        for arabic_label, raw_value in (dom.get('specs_raw') or {}).items():
+            field = LABEL_MAP.get(arabic_label.strip())
+            if field and not data.get(field):
+                data[field] = _clean(raw_value)
 
         try:
             self._sheet_append(data)

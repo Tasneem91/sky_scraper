@@ -1251,6 +1251,16 @@ class SyriaCarsScraper:
             logger.info(f'  ✗ Quality skip — price "{detail.get("price")}" is not numeric')
             return False
 
+        # Engine size must be numeric and at least 100 cc
+        eng_str = re.sub(r'[^\d.]', '', str(detail.get('engine_size', '')))
+        try:
+            if not eng_str or float(eng_str) < 100:
+                logger.info(f'  ✗ Quality skip — engine_size "{detail.get("engine_size")}" is not a valid CC value')
+                return False
+        except ValueError:
+            logger.info(f'  ✗ Quality skip — engine_size "{detail.get("engine_size")}" is not numeric')
+            return False
+
         # Must have at least one image to upload / dewatermark
         if not image_urls:
             logger.info('  ✗ Quality skip — no images available')
@@ -1484,9 +1494,6 @@ class SyriaCarsScraper:
             dated = [it for it in items if it.get('date_added')]
             if dated and all(it['date_added'] < _cutoff for it in dated):
                 logger.info(f'  All listings on this page are before {_cutoff} — done.')
-                if self.full_mode:
-                    progress['full_scrape_done'] = True
-                    _save_progress(progress)
                 break
 
             # Drop items outside [start_date, end_date]

@@ -77,14 +77,15 @@ SCOPES = [
     'https://www.googleapis.com/auth/drive',
 ]
 
-SITE_URL        = 'https://damazzle.com'
-SEARCH_URL      = 'https://damazzle.com/motors/cars/search'
-SOURCE          = 'damazzle'
-PER_PAGE        = 20        # requested from API; site default is 8
-PAGE_TIMEOUT    = 30_000    # ms
-RESPONSE_WAIT   = 8.0       # seconds to wait after page load
-REQUEST_DELAY   = 1.5       # seconds between requests
-STOP_FULL_PAGES = 3         # incremental mode: stop after N all-seen pages
+SITE_URL          = 'https://damazzle.com'
+SEARCH_URL        = 'https://damazzle.com/motors/cars/search'
+SOURCE            = 'damazzle'
+API_DETAIL_BASE   = 'https://beta.damazzletech.com/api/api/v1/ads/details-by-slug'
+PER_PAGE          = 20        # requested from API; site default is 8
+PAGE_TIMEOUT      = 30_000    # ms
+RESPONSE_WAIT     = 8.0       # seconds to wait after page load
+REQUEST_DELAY     = 1.5       # seconds between requests
+STOP_FULL_PAGES   = 3         # incremental mode: stop after N all-seen pages
 
 # Substring that identifies the listing API (not categories, not static)
 LISTING_API_MARKER = 'search/ads'
@@ -109,25 +110,41 @@ COLUMNS: List[str] = [
 # ── Field maps ────────────────────────────────────────────────────────────────
 
 SLUG_MAP: Dict[str, str] = {
-    'mileage':           'mileage',
-    'year':              'year',
-    'exterior_color':    'exterior_color',
-    'interior_color':    'interior_color',
-    'fuel_type':         'fuel_type',
-    'transmission':      'transmission',
-    'condition':         'condition',
-    'engine_size':       'engine_size',
-    'body_type':         'body_type',
-    'drive_system':      'drive_system',
-    'doors':             'doors',
-    'cylinders':         'cylinders',
-    'chassis_number':    'chassis_number',
-    'warranty':          'warranty',
-    'chassis_condition': 'chassis_condition',
-    'horsepower':        'horsepower',
-    'seats':             'seats',
-    'steering_side':     'steering_side',
-    'origin':            'origin',
+    # API slugs from details-by-slug endpoint (confirmed from damazzle_standalone.py)
+    'traveled_distance':    'mileage',
+    'year_of_manufacture':  'year',
+    'color':                'exterior_color',
+    'Color':                'exterior_color',
+    'exterior_color':       'exterior_color',
+    'interior_color':       'interior_color',
+    'fuel_type':            'fuel_type',
+    'Fuel_type':            'fuel_type',
+    'transmission':         'transmission',
+    'Transmission':         'transmission',
+    'gearbox':              'transmission',
+    'condition':            'condition',
+    'Condition':            'condition',
+    'car_condition':        'condition',
+    'engine_capacity':      'engine_size',
+    'engine':               'engine_size',
+    'body_type':            'body_type',
+    'drive_system':         'drive_system',
+    'drive_type':           'drive_system',
+    'doors':                'doors',
+    'cylinders':            'cylinders',
+    'vin':                  'chassis_number',
+    'chassis':              'chassis_number',
+    # Fallback simple slugs (may appear in featured_fields)
+    'mileage':              'mileage',
+    'year':                 'year',
+    'engine_size':          'engine_size',
+    'chassis_number':       'chassis_number',
+    'warranty':             'warranty',
+    'chassis_condition':    'chassis_condition',
+    'horsepower':           'horsepower',
+    'seats':                'seats',
+    'steering_side':        'steering_side',
+    'origin':               'origin',
 }
 
 LABEL_MAP: Dict[str, str] = {
@@ -327,7 +344,7 @@ def _append_jsonl(record: Dict):
 # ── Car parser ────────────────────────────────────────────────────────────────
 
 
-def _parse_car(c: Dict, detail: Optional[Dict] = None) -> Dict:
+def _parse_car(c: Dict) -> Dict:
     data: Dict = {
         'scraped_at': datetime.now().isoformat(),
         'source':     SOURCE,
@@ -361,31 +378,78 @@ def _parse_car(c: Dict, detail: Optional[Dict] = None) -> Dict:
     )
 
     def _apply_attrs(attrs):
+        """Handle both flat {slug, name_ar, value_ar} and nested {template_field, value} structures."""
         for attr in (attrs or []):
             if not isinstance(attr, dict):
                 continue
-            key   = str(attr.get('slug', '') or attr.get('key', '') or '').strip().lower()
-            label = _clean(attr.get('name_ar') or attr.get('label_ar') or attr.get('name') or '')
-            val   = _clean(
-                attr.get('value_ar') or attr.get('value') or attr.get('val') or
-                attr.get('display_value') or ''
-            )
+            # Nested structure from details-by-slug: {template_field: {slug, field_name_ar}, value: {ar}}
+            tf = attr.get('template_field')
+            if isinstance(tf, dict):
+                key   = str(tf.get('slug', '') or '').strip()
+                label = _clean(tf.get('field_name_ar') or tf.get('name_ar') or '')
+                val_obj = attr.get('value') or {}
+                val   = _clean(
+                    val_obj.get('ar') or val_obj.get('en') or ''
+                    if isinstance(val_obj, dict) else str(val_obj)
+                )
+            else:
+                # Flat structure from featured_fields / attributes
+                key   = str(attr.get('slug', '') or attr.get('key', '') or '').strip()
+                label = _clean(attr.get('name_ar') or attr.get('label_ar') or attr.get('name') or '')
+                val   = _clean(
+                    attr.get('value_ar') or attr.get('value') or attr.get('val') or
+                    attr.get('display_value') or ''
+                )
+            if not val or val in ('غير محدد', 'غير_محدد', '-', ''):
+                continue
             field = SLUG_MAP.get(key) or LABEL_MAP.get(label)
             if field and not data.get(field):
                 data[field] = val
 
-    _apply_attrs(c.get('featuredAttributes') or c.get('featured_attributes') or [])
+    # detail_fields from details-by-slug come first (most complete), then featured_fields
+    _apply_attrs(c.get('_detail_fields') or [])
+    _apply_attrs(c.get('featured_fields') or c.get('featuredAttributes') or c.get('featured_attributes') or [])
     _apply_attrs(c.get('attributes') or [])
+
+    # Phone: listing API has it at top level (car.phone / car.whatsapp)
+    if not data.get('phone'):
+        phone    = _clean(str(c.get('phone')    or ''))
+        whatsapp = _clean(str(c.get('whatsapp') or ''))
+        if phone and phone not in ('None', 'null', '0'):
+            data['phone'] = phone
+        elif whatsapp and whatsapp not in ('None', 'null', '0'):
+            data['phone'] = whatsapp
+
+    # Seller: listing API has it at car.customer.name
+    if not data.get('seller_name'):
+        customer = c.get('customer') or c.get('created_by') or {}
+        if isinstance(customer, dict):
+            data['seller_name'] = _clean(
+                customer.get('name') or customer.get('full_name') or ''
+            )
+            seller_ads = customer.get('totalAds') or customer.get('ads_count')
+            if seller_ads is not None:
+                data['seller_listings'] = str(seller_ads)
+
+    # Model
+    if not data.get('model'):
+        data['model'] = _clean(c.get('model_ar') or c.get('model') or '')
+
+    # Description
+    if not data.get('description'):
+        data['description'] = _clean(
+            c.get('description_ar') or c.get('description') or ''
+        )
 
     # Direct flat fields as fallback
     for src, dst in (
-        ('year', 'year'), ('model', 'model'), ('mileage', 'mileage'),
-        ('color', 'exterior_color'), ('exterior_color', 'exterior_color'),
-        ('interior_color', 'interior_color'), ('fuel_type', 'fuel_type'),
-        ('transmission', 'transmission'), ('condition', 'condition'),
-        ('engine_size', 'engine_size'), ('body_type', 'body_type'),
-        ('drive_system', 'drive_system'), ('doors', 'doors'),
-        ('cylinders', 'cylinders'), ('chassis_number', 'chassis_number'),
+        ('year', 'year'), ('color', 'exterior_color'),
+        ('exterior_color', 'exterior_color'), ('interior_color', 'interior_color'),
+        ('fuel_type', 'fuel_type'), ('transmission', 'transmission'),
+        ('condition', 'condition'), ('engine_size', 'engine_size'),
+        ('body_type', 'body_type'), ('drive_system', 'drive_system'),
+        ('doors', 'doors'), ('cylinders', 'cylinders'),
+        ('chassis_number', 'chassis_number'), ('mileage', 'mileage'),
     ):
         if not data.get(dst) and c.get(src):
             data[dst] = _clean(str(c[src]))
@@ -400,60 +464,15 @@ def _parse_car(c: Dict, detail: Optional[Dict] = None) -> Dict:
         if data.get(field):
             data[field] = _arabic(data[field], mapping)
 
+    # Images: gallery > images > cover_image
     images: List[str] = []
-    for img in (c.get('images') or c.get('photos') or c.get('media') or []):
-        src = (img.get('url') or img.get('src') or img.get('path') or ''
+    for img in (c.get('gallery') or c.get('images') or c.get('photos') or []):
+        src = (img.get('src') or img.get('url') or img.get('path') or ''
                if isinstance(img, dict) else str(img)).strip()
         if src and src.startswith('http'):
             images.append(src)
-
-    # Enrich from detail — detail must be a dict, data key must also be a dict
-    if isinstance(detail, dict):
-        data_val = detail.get('data')
-        if isinstance(data_val, dict):
-            dd = data_val
-        elif data_val is None:
-            # detail IS the car object directly
-            dd = detail if (detail.get('id') or detail.get('slug') or detail.get('title')) else {}
-        else:
-            dd = {}   # data is a list or something unexpected — skip
-
-        if dd:
-            if not data.get('model'):
-                data['model'] = _clean(dd.get('model_ar') or dd.get('model') or '')
-            if not data.get('description'):
-                data['description'] = _clean(
-                    dd.get('description_ar') or dd.get('description') or ''
-                )
-
-            seller = dd.get('user', {}) or dd.get('seller', {}) or {}
-            if not data.get('seller_name'):
-                data['seller_name'] = _clean(
-                    seller.get('name') or seller.get('full_name') or ''
-                )
-            phones = dd.get('phones', []) or dd.get('contact_phones', []) or []
-            if not data.get('phone') and phones:
-                p = phones[0]
-                data['phone'] = _clean(
-                    p.get('number') or p.get('phone') or ''
-                    if isinstance(p, dict) else str(p)
-                )
-            seller_ads = seller.get('totalAds') or seller.get('ads_count')
-            if seller_ads is not None:
-                data['seller_listings'] = str(seller_ads)
-
-            _apply_attrs(dd.get('attributes') or dd.get('featuredAttributes') or [])
-
-            detail_imgs = dd.get('images') or dd.get('photos') or dd.get('media') or []
-            if detail_imgs:
-                imgs2 = []
-                for img in detail_imgs:
-                    src = (img.get('url') or img.get('src') or img.get('path') or ''
-                           if isinstance(img, dict) else str(img)).strip()
-                    if src and src.startswith('http'):
-                        imgs2.append(src)
-                if imgs2:
-                    images = imgs2
+    if not images and c.get('cover_image'):
+        images = [c['cover_image']]
 
     data['image_urls']  = images
     data['image_count'] = len(images)
@@ -724,6 +743,32 @@ class DamazzleRawScraper:
             logger.error(f'  Direct API error: {exc}')
             return [], None
 
+    # ── Details-by-slug API (full structured specs) ──────────────────────────
+
+    def _fetch_detail_fields(self, slug: str) -> List[Dict]:
+        """
+        GET /api/v1/ads/details-by-slug/{slug}
+        Returns data.ad.fields — the FULL set of معلومات اضافية specs.
+        The listing API only returns 2 featured_fields; this has everything.
+        """
+        if not slug:
+            return []
+        # Use just the final slug segment (strip make/date prefix if present)
+        ad_slug = slug.split('/')[-1] if '/' in slug else slug
+        try:
+            r = self.http.get(f'{API_DETAIL_BASE}/{ad_slug}', timeout=15)
+            if r.status_code != 200:
+                logger.debug(f'  detail-by-slug {ad_slug}: HTTP {r.status_code}')
+                return []
+            body = r.json()
+            ad = (body.get('data') or {}).get('ad') or {}
+            fields = ad.get('fields') or []
+            logger.debug(f'  detail-by-slug {ad_slug}: {len(fields)} fields')
+            return fields
+        except Exception as exc:
+            logger.debug(f'  detail-by-slug error ({ad_slug}): {exc}')
+            return []
+
     # ── BS4 detail fetcher (SSR endpoint) ────────────────────────────────────
 
     def _requests_detail(self, slug: str) -> Dict:
@@ -838,7 +883,7 @@ class DamazzleRawScraper:
 
     # ── Car processing ────────────────────────────────────────────────────────
 
-    def _process_car(self, c: Dict, detail: Optional[Dict], dom: Dict) -> bool:
+    def _process_car(self, c: Dict) -> bool:
         lid    = str(c.get('id', '') or c.get('_id', '') or '').strip()
         slug   = str(c.get('slug', '') or '').strip()
         car_id = f'damazzle_{lid}' if lid else f'damazzle_{slug}'
@@ -855,30 +900,18 @@ class DamazzleRawScraper:
             if self.end_date and date_added > self.end_date:
                 return False
 
+        # Fetch ALL structured spec fields from the detail-by-slug endpoint.
+        # The listing API only gives 2 featured_fields; the detail API gives everything.
+        if slug:
+            detail_fields = self._fetch_detail_fields(slug)
+            if detail_fields:
+                c = {**c, '_detail_fields': detail_fields}
+
         try:
-            data = _parse_car(c, detail)
+            data = _parse_car(c)
         except Exception as exc:
             logger.error(f'  Parse error ({car_id}): {exc}')
             return False
-
-        # Merge DOM / BS4-extracted fields as fallbacks
-        if dom.get('phone') and not data.get('phone'):
-            data['phone'] = dom['phone']
-        if dom.get('seller_name') and not data.get('seller_name'):
-            data['seller_name'] = dom['seller_name']
-        if dom.get('price') and not data.get('price'):
-            data['price'] = dom['price']
-        if dom.get('description') and not data.get('description'):
-            data['description'] = dom['description']
-        if dom.get('images') and not data.get('image_urls'):
-            data['image_urls']  = dom['images']
-            data['image_count'] = len(dom['images'])
-
-        # Apply spec pairs from BS4 / DOM via LABEL_MAP
-        for arabic_label, raw_value in (dom.get('specs_raw') or {}).items():
-            field = LABEL_MAP.get(arabic_label.strip())
-            if field and not data.get(field):
-                data[field] = _clean(raw_value)
 
         try:
             self._sheet_append(data)
@@ -1002,16 +1035,8 @@ class DamazzleRawScraper:
                     lid  = str(it.get('id',   '') or '').strip()
                     logger.info(f'  → {slug or lid}')
 
-                    detail, dom = None, {}
-                    if slug:
-                        # Use requests+BS4 on the SSR /ads/ endpoint (much faster + reliable)
-                        loop = asyncio.get_event_loop()
-                        dom  = await loop.run_in_executor(
-                            None, self._requests_detail, slug
-                        )
-                        await asyncio.sleep(REQUEST_DELAY)
-
-                    ok = self._process_car(it, detail, dom)
+                    ok = self._process_car(it)
+                    await asyncio.sleep(REQUEST_DELAY)
                     if ok:
                         total_new += 1
                         progress['total_scraped'] += 1

@@ -67,9 +67,11 @@ SCOPES = [
     'https://www.googleapis.com/auth/drive',
 ]
 
-API_BASE   = 'https://app.carsy.app/api'
-SOURCE     = 'carsy'
-PAGE_SIZE  = 20
+API_BASE        = 'https://app.carsy.app/api'
+API_DETAIL_URL  = 'https://app.carsy.app/api/classifieds/{id}'
+SITE_CAR_URL    = 'https://carsy.app/cars/{id}'
+SOURCE          = 'carsy'
+PAGE_SIZE       = 20
 
 REQUEST_DELAY         = 0.8
 STOP_AFTER_FULL_PAGES = 3
@@ -116,12 +118,14 @@ COLOR_MAP: Dict[str, str] = {
 TRANS_MAP: Dict[str, str] = {
     'automatic': 'أوتوماتيك',
     'manual':    'مانيوال',
+    'normal':    'مانيوال',
     'cvt':       'CVT',
 }
 
 FUEL_MAP: Dict[str, str] = {
     'gasoline': 'بنزين',
     'petrol':   'بنزين',
+    'oil':      'بنزين',
     'diesel':   'ديزل',
     'electric': 'كهربائي',
     'hybrid':   'هايبرد',
@@ -143,11 +147,13 @@ BODY_MAP: Dict[str, str] = {
 }
 
 DRIVE_MAP: Dict[str, str] = {
-    'fwd': 'دفع أمامي',
-    'rwd': 'دفع خلفي',
-    '4wd': 'دفع رباعي',
-    'awd': 'دفع رباعي كامل',
-    '4x4': 'دفع رباعي',
+    'fwd':   'دفع أمامي',
+    'rwd':   'دفع خلفي',
+    '4wd':   'دفع رباعي',
+    'awd':   'دفع رباعي كامل',
+    '4x4':   'دفع رباعي',
+    'front': 'دفع أمامي',
+    'rear':  'دفع خلفي',
 }
 
 COND_MAP: Dict[str, str] = {
@@ -157,13 +163,14 @@ COND_MAP: Dict[str, str] = {
 }
 
 ORIGIN_MAP: Dict[str, str] = {
-    'local':    'محلي',
-    'imported': 'مستورد',
-    'gcc':      'خليجي',
-    'european': 'أوروبي',
-    'american': 'أمريكي',
-    'japanese': 'ياباني',
-    'korean':   'كوري',
+    'local':         'محلي',
+    'imported':      'مستورد',
+    'gcc':           'خليجي',
+    'european':      'أوروبي',
+    'american':      'أمريكي',
+    'japanese':      'ياباني',
+    'korean':        'كوري',
+    'syria_agency':  'وكالة سورية',
 }
 
 SPECS_MAP: Dict[str, str] = {
@@ -173,6 +180,25 @@ SPECS_MAP: Dict[str, str] = {
     'european':    'مواصفات أوروبية',
     'japanese':    'مواصفات يابانية',
     'standard':    'قياسي',
+    'third_class': 'الفئة الثالثة فأدنى',
+}
+
+CITY_MAP: Dict[str, str] = {
+    'damascus':    'دمشق',
+    'aleppo':      'حلب',
+    'homs':        'حمص',
+    'latakia':     'اللاذقية',
+    'tartous':     'طرطوس',
+    'tartus':      'طرطوس',
+    'hama':        'حماة',
+    'daraa':       'درعا',
+    'deir_ez_zor': 'دير الزور',
+    'idlib':       'إدلب',
+    'raqqa':       'الرقة',
+    'hasakah':     'الحسكة',
+    'qamishli':    'القامشلي',
+    'suwayda':     'السويداء',
+    'quneitra':    'القنيطرة',
 }
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -357,114 +383,135 @@ class CarsyRawScraper:
             logger.error(f'  API error (page {page}): {exc}')
             return None
 
-    def _parse_classified(self, c: Dict) -> Dict:
+    def _fetch_detail(self, car_id: str) -> Optional[Dict]:
+        url = API_DETAIL_URL.format(id=car_id)
+        try:
+            resp = self.session.get(url, timeout=30)
+            if resp.status_code != 200:
+                logger.debug(f'  Detail {car_id}: HTTP {resp.status_code}')
+                return None
+            body = resp.json()
+            return (body.get('data') or {}).get('classified')
+        except Exception as exc:
+            logger.debug(f'  Detail fetch error ({car_id}): {exc}')
+            return None
+
+    def _parse_classified(self, c: Dict, listing: Optional[Dict] = None) -> Dict:
+        """Parse a classified dict (from detail API) into a flat row dict.
+
+        c       — detail API response (data.classified), the primary source
+        listing — original listing item as fallback for any missing fields
+        """
         data: Dict = {
             'scraped_at': datetime.now().isoformat(),
             'source':     SOURCE,
         }
 
-        lid = str(c.get('id', '') or '').strip()
+        base = {**(listing or {}), **c}   # detail wins over listing
+
+        lid = str(base.get('id', '') or '').strip()
         data['listing_id'] = lid
         data['id']         = f'carsy_{lid}'
+        data['car_url']    = SITE_CAR_URL.format(id=lid) if lid else ''
 
-        slug = str(c.get('slug', '') or lid).strip()
-        data['car_url'] = f'https://carsy.app/classifieds/{slug}' if slug else ''
+        # Title (API returns title_ar)
+        data['ad_title']     = _clean(base.get('title_ar') or base.get('title_en') or base.get('name') or '')
+        data['listing_type'] = 'للبيع'
+        data['price']        = _parse_price(base.get('price'))
+        data['date_added']   = ''   # API only returns relative dates; no absolute creation date
 
-        data['ad_title']     = _clean(c.get('title') or c.get('name', ''))
-        data['listing_type'] = _clean(str(c.get('listing_type') or c.get('type') or 'للبيع'))
-        data['price']        = _parse_price(c.get('price'))
-        data['date_added']   = _parse_date(
-            c.get('created_at') or c.get('date') or c.get('published_at')
-        )
+        # Make / model from brand.parent (make) and brand (model)
+        brand_obj  = base.get('brand') or {}
+        if isinstance(brand_obj, dict):
+            parent_obj = brand_obj.get('parent') or {}
+            data['make']  = _clean(parent_obj.get('name_ar') or parent_obj.get('name') or '')
+            data['model'] = _clean(brand_obj.get('name_ar') or brand_obj.get('name') or '')
+        else:
+            data['make'] = data['model'] = ''
 
-        # Make / model
-        make_obj  = c.get('make', {}) or {}
-        model_obj = c.get('model', {}) or {}
-        data['make']  = _clean(
-            make_obj.get('name_ar') or make_obj.get('name') or c.get('make') or ''
-        )
-        data['model'] = _clean(
-            model_obj.get('name_ar') or model_obj.get('name') or c.get('model') or ''
-        )
+        data['year'] = _clean(str(base.get('year') or ''))
 
-        data['year'] = _clean(str(c.get('year') or ''))
-
-        # Colours
-        raw_ext = _clean(str(c.get('exterior_color') or c.get('color') or ''))
+        # Colors: detail API uses external_color / internal_color (English)
+        raw_ext = _clean(str(base.get('external_color') or base.get('exterior_color') or base.get('color') or ''))
         data['exterior_color'] = _ar(raw_ext, COLOR_MAP) if raw_ext else ''
-        raw_int = _clean(str(c.get('interior_color') or ''))
+        raw_int = _clean(str(base.get('internal_color') or base.get('interior_color') or ''))
         data['interior_color'] = _ar(raw_int, COLOR_MAP) if raw_int else ''
 
-        # Mileage
-        raw_mil = c.get('mileage') or c.get('odometer') or ''
-        data['mileage'] = re.sub(r'[,،٬]', '', str(raw_mil)).strip() if raw_mil else ''
+        # Mileage: kilometers_parsed is human-readable ("+100,000"), kilometers is a category code
+        data['mileage'] = _clean(str(base.get('kilometers_parsed') or base.get('mileage') or base.get('odometer') or ''))
 
-        # Engine / drivetrain
-        data['engine_size']  = _clean(str(c.get('engine_size') or c.get('engine') or ''))
-        data['cylinders']    = _clean(str(c.get('cylinders') or c.get('cylinder_count') or ''))
-        data['transmission'] = _ar(_clean(str(c.get('transmission') or '')), TRANS_MAP)
-        data['fuel_type']    = _ar(_clean(str(c.get('fuel_type') or '')), FUEL_MAP)
-        data['drive_system'] = _ar(_clean(str(c.get('drive_system') or c.get('drivetrain') or '')), DRIVE_MAP)
+        # Engine / drivetrain: detail API uses engine_capacity, number_of_cylinders, drive_line
+        data['engine_size']  = _clean(str(base.get('engine_capacity') or base.get('engine_size') or base.get('engine') or ''))
+        data['cylinders']    = _clean(str(base.get('number_of_cylinders') or base.get('cylinders') or ''))
+        data['transmission'] = _ar(_clean(str(base.get('transmission') or '')), TRANS_MAP)
+        data['fuel_type']    = _ar(_clean(str(base.get('fuel_type') or '')), FUEL_MAP)
+        data['drive_system'] = _ar(_clean(str(base.get('drive_line') or base.get('drive_system') or base.get('drivetrain') or '')), DRIVE_MAP)
 
         # Body / condition / status
-        data['body_type']  = _ar(_clean(str(c.get('body_type') or '')), BODY_MAP)
-        data['condition']  = _ar(_clean(str(c.get('condition') or '')), COND_MAP)
-        data['status']     = _clean(str(c.get('status') or ''))
+        data['body_type']  = _ar(_clean(str(base.get('body_type') or '')), BODY_MAP)
+        data['condition']  = _ar(_clean(str(base.get('condition') or '')), COND_MAP)
+        data['status']     = _clean(str(base.get('status') or ''))
 
-        # Origin / specs
-        raw_origin = _clean(str(c.get('origin') or ''))
-        data['origin']         = _ar(raw_origin, ORIGIN_MAP) if raw_origin else ''
-        raw_specs = _clean(str(c.get('specifications') or c.get('specs') or ''))
+        # Origin: detail API uses 'source' field (e.g. "syria_agency")
+        raw_origin = _clean(str(base.get('source') or base.get('origin') or ''))
+        data['origin'] = _ar(raw_origin, ORIGIN_MAP) if raw_origin else ''
+
+        # Specifications
+        raw_specs = _clean(str(base.get('specifications') or base.get('specs') or ''))
         data['specifications'] = _ar(raw_specs, SPECS_MAP) if raw_specs else ''
 
-        # Location
-        city_obj = c.get('city', {}) or {}
-        data['city'] = _clean(
-            city_obj.get('name_ar') or city_obj.get('name') or
-            c.get('city') or c.get('location') or ''
-        )
+        # Location: API returns English city name (e.g. "damascus")
+        raw_city = _clean(str(base.get('city') or base.get('location') or ''))
+        data['city'] = _ar(raw_city, CITY_MAP) if raw_city else ''
 
-        # Seller
-        seller = c.get('user', {}) or c.get('seller', {}) or {}
-        data['seller_name'] = _clean(
-            seller.get('name') or seller.get('full_name') or c.get('contact_name') or ''
-        )
-        data['phone'] = _clean(
-            c.get('phone') or c.get('contact_phone') or
-            seller.get('phone') or ''
-        )
+        # Seller: detail API has user.name and user.phone
+        user_obj = base.get('user') or {}
+        if isinstance(user_obj, dict):
+            data['seller_name'] = _clean(user_obj.get('name') or user_obj.get('full_name') or '')
+            data['phone']       = _clean(str(user_obj.get('phone') or ''))
+        else:
+            data['seller_name'] = ''
+            data['phone']       = ''
 
         # Description
-        data['description'] = _clean(c.get('description') or c.get('notes') or '')
+        data['description'] = _clean(base.get('description') or base.get('notes') or '')
 
         # Extra fields
-        data['views']    = str(c.get('views_count') or c.get('views') or '')
-        data['featured'] = str(bool(c.get('is_featured') or c.get('featured')))
+        data['views']    = str(base.get('views_count') or base.get('views') or '')
+        data['featured'] = str(bool(base.get('is_featured') or base.get('featured')))
 
-        # Image URLs (collected, not downloaded)
+        # Images:
+        #   listing API → space-separated string
+        #   detail API  → array of strings or dicts
         images: List[str] = []
-        for img in (c.get('images') or c.get('photos') or []):
-            src = (img.get('url') or img.get('src') or img.get('path') or ''
-                   if isinstance(img, dict) else str(img)).strip()
-            if src and not src.endswith('/'):
-                images.append(src)
-
-        thumbnail = (c.get('thumbnail') or c.get('main_image') or c.get('cover_image') or '')
-        if thumbnail and thumbnail not in images:
-            images.insert(0, thumbnail)
+        raw_images = base.get('images') or []
+        if isinstance(raw_images, str):
+            images = [u.strip() for u in raw_images.split() if u.strip()]
+        elif isinstance(raw_images, list):
+            for img in raw_images:
+                src = (img.get('url') or img.get('src') or img.get('path') or ''
+                       if isinstance(img, dict) else str(img)).strip()
+                if src and not src.endswith('/'):
+                    images.append(src)
 
         data['image_urls']  = images
         data['image_count'] = len(images)
         return data
 
-    def _process_car(self, c: Dict) -> bool:
-        car_id = f"carsy_{c.get('id', '')}"
+    def _process_car(self, listing: Dict) -> bool:
+        lid    = str(listing.get('id', '') or '').strip()
+        car_id = f'carsy_{lid}'
         if car_id in self.existing_ids:
             return False
 
         logger.info(f'  → {car_id}')
+
+        # Fetch detail API for phone, specs, make/model
+        classified = self._fetch_detail(lid)
+        c = classified if classified else listing
+
         try:
-            data = self._parse_classified(c)
+            data = self._parse_classified(c, listing=listing)
         except Exception as exc:
             logger.error(f'  Parse error: {exc}')
             return False
@@ -566,9 +613,9 @@ class CarsyRawScraper:
             if self._should_stop():
                 break
 
-            total = (payload.get('total') or payload.get('total_count') or
-                     payload.get('count') or None)
-            if total is not None and page * PAGE_SIZE >= int(total):
+            pagination = payload.get('pagination') or {}
+            last_page  = pagination.get('last_page')
+            if last_page is not None and page >= int(last_page):
                 logger.info('  All pages scraped.')
                 if self.full_mode:
                     progress['full_scrape_done'] = True

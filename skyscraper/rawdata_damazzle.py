@@ -3,18 +3,22 @@
 """
 Damazzle Raw Data Scraper
 =========================
-Scrapes ALL car listings from damazzle.com using Playwright to intercept
-the real API calls the Angular SPA makes.  Writes each car to:
-  • rawdata_damazzle.jsonl  (local backup, one JSON per line)
+Writes each car to:
+  • rawdata_damazzle.jsonl  (local backup)
   • Google Sheet: damazzle_raw_data
 
-No images downloaded. No quality gate. Pure data extraction.
+Strategy
+--------
+Page 1 → Playwright browser intercepts the real listing API URL.
+Pages 2+ → requests calls that URL directly (faster, per_page=20).
+Detail pages → Playwright intercepts the single-car JSON response.
+
+No images downloaded. No quality gate.
 Requires: pip install playwright && playwright install chromium
 
 USAGE
 -----
-  python rawdata_damazzle.py                         # incremental
-  python rawdata_damazzle.py --full                  # resume full scrape
+  python rawdata_damazzle.py --full
   python rawdata_damazzle.py --hours 4
   python rawdata_damazzle.py --start-date 2025-01-01
 """
@@ -30,6 +34,9 @@ import sys
 import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set
+from urllib.parse import urlencode, urlparse, parse_qs, urlunparse
+
+import requests as req_lib
 
 import gspread
 from google.auth.transport.requests import Request
@@ -69,15 +76,17 @@ SCOPES = [
     'https://www.googleapis.com/auth/drive',
 ]
 
-SITE_URL   = 'https://damazzle.com'
-SEARCH_URL = 'https://damazzle.com/motors/cars/search'
-SOURCE     = 'damazzle'
+SITE_URL        = 'https://damazzle.com'
+SEARCH_URL      = 'https://damazzle.com/motors/cars/search'
+SOURCE          = 'damazzle'
+PER_PAGE        = 20        # requested from API; site default is 8
+PAGE_TIMEOUT    = 30_000    # ms
+RESPONSE_WAIT   = 8.0       # seconds to wait after page load
+REQUEST_DELAY   = 1.5       # seconds between requests
+STOP_FULL_PAGES = 3         # incremental mode: stop after N all-seen pages
 
-# How long to wait for the page to load + API response (seconds)
-PAGE_TIMEOUT    = 30_000
-RESPONSE_WAIT   = 10.0
-REQUEST_DELAY   = 1.5
-STOP_AFTER_FULL_PAGES = 3
+# Substring that identifies the listing API (not categories, not static)
+LISTING_API_MARKER = 'search/ads'
 
 # ── Sheet columns ─────────────────────────────────────────────────────────────
 
@@ -121,26 +130,26 @@ SLUG_MAP: Dict[str, str] = {
 }
 
 LABEL_MAP: Dict[str, str] = {
-    'الكيلومتراج':  'mileage',
-    'السنة':        'year',
-    'اللون الخارجي':'exterior_color',
-    'اللون الداخلي':'interior_color',
-    'الوقود':       'fuel_type',
-    'ناقل الحركة':  'transmission',
-    'الغيار':       'transmission',
-    'الحالة':       'condition',
-    'المحرك':       'engine_size',
-    'نوع الجسم':    'body_type',
-    'نظام الدفع':   'drive_system',
-    'الأبواب':      'doors',
-    'السلندرات':    'cylinders',
-    'رقم الهيكل':   'chassis_number',
-    'الضمان':       'warranty',
-    'حالة الهيكل':  'chassis_condition',
-    'قوة الحصان':   'horsepower',
-    'المقاعد':      'seats',
-    'جهة القيادة':  'steering_side',
-    'الوارد':       'origin',
+    'الكيلومتراج':   'mileage',
+    'السنة':         'year',
+    'اللون الخارجي': 'exterior_color',
+    'اللون الداخلي': 'interior_color',
+    'الوقود':        'fuel_type',
+    'ناقل الحركة':   'transmission',
+    'الغيار':        'transmission',
+    'الحالة':        'condition',
+    'المحرك':        'engine_size',
+    'نوع الجسم':     'body_type',
+    'نظام الدفع':    'drive_system',
+    'الأبواب':       'doors',
+    'السلندرات':     'cylinders',
+    'رقم الهيكل':    'chassis_number',
+    'الضمان':        'warranty',
+    'حالة الهيكل':   'chassis_condition',
+    'قوة الحصان':    'horsepower',
+    'المقاعد':       'seats',
+    'جهة القيادة':   'steering_side',
+    'الوارد':        'origin',
 }
 
 COND_MAP  = {'used': 'مستعمل', 'new': 'جديد', 'damaged': 'متضرر'}
@@ -194,44 +203,57 @@ def _to_cell(v) -> str:
     return str(v)
 
 
-def _looks_like_listing_array(obj: Any) -> bool:
-    """Return True if obj looks like a page of car listings."""
-    items = None
-    if isinstance(obj, list):
-        items = obj
-    elif isinstance(obj, dict):
-        for key in ('data', 'results', 'ads', 'items', 'records', 'listings'):
-            if isinstance(obj.get(key), list):
-                items = obj[key]
-                break
-    if not items or len(items) < 1:
+def _is_listing_response(url: str, body: Any) -> bool:
+    """True only if this is a car-listing API response (not categories etc.)."""
+    if LISTING_API_MARKER not in url:
+        return False
+    items = _extract_items(body)
+    if not items:
         return False
     sample = items[0]
     if not isinstance(sample, dict):
         return False
-    # Must have at least a few car-like keys
-    car_keys = {'slug', 'title', 'price', 'id', 'make', 'brand', 'category',
-                'mileage', 'year', 'condition', 'city', 'governorate'}
-    return len(car_keys & set(sample.keys())) >= 2
+    # Must have price (categories never have price)
+    return 'price' in sample or 'published_date' in sample
 
 
-def _extract_items(obj: Any) -> List[Dict]:
-    if isinstance(obj, list):
-        return obj
-    if isinstance(obj, dict):
+def _extract_items(body: Any) -> List[Dict]:
+    if isinstance(body, list):
+        return body
+    if isinstance(body, dict):
         for key in ('data', 'results', 'ads', 'items', 'records', 'listings'):
-            if isinstance(obj.get(key), list):
-                return obj[key]
+            val = body.get(key)
+            if isinstance(val, list):
+                return val
     return []
 
 
-def _extract_total(obj: Any) -> Optional[int]:
-    if isinstance(obj, dict):
-        for key in ('total', 'count', 'totalCount', 'total_count', 'totalItems'):
-            v = obj.get(key)
+def _extract_total(body: Any) -> Optional[int]:
+    if isinstance(body, dict):
+        for key in ('total', 'count', 'totalCount', 'total_count', 'meta'):
+            v = body.get(key)
             if isinstance(v, int):
                 return v
+            if isinstance(v, dict):
+                for k2 in ('total', 'count', 'totalItems'):
+                    if isinstance(v.get(k2), int):
+                        return v[k2]
     return None
+
+
+def _build_page_url(base_url: str, page: int, per_page: int = PER_PAGE) -> str:
+    """Replace page/per_page params in a discovered API URL."""
+    parsed = urlparse(base_url)
+    params = parse_qs(parsed.query, keep_blank_values=True)
+    params['page']     = [str(page)]
+    params['per_page'] = [str(per_page)]
+    # Flatten lists for urlencode
+    flat = []
+    for k, vals in params.items():
+        for v in vals:
+            flat.append((k, v))
+    new_query = urlencode(flat)
+    return urlunparse(parsed._replace(query=new_query))
 
 
 # ── OAuth2 ────────────────────────────────────────────────────────────────────
@@ -271,14 +293,18 @@ def _load_progress() -> Dict:
                 return json.load(fh)
         except Exception:
             pass
-    return {'last_page': 0, 'total_scraped': 0, 'full_scrape_done': False,
-            'discovered_api': None}
+    return {
+        'last_page': 0,
+        'total_scraped': 0,
+        'full_scrape_done': False,
+        'listing_api_url': None,   # discovered on first run
+    }
 
 
-def _save_progress(progress: Dict):
+def _save_progress(p: Dict):
     tmp = PROGRESS_FILE + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as fh:
-        json.dump(progress, fh, indent=2, ensure_ascii=False)
+        json.dump(p, fh, indent=2, ensure_ascii=False)
     os.replace(tmp, PROGRESS_FILE)
 
 
@@ -301,13 +327,7 @@ def _parse_car(c: Dict, detail: Optional[Dict] = None) -> Dict:
     data['listing_id'] = lid
     data['id']         = f'damazzle_{lid}' if lid else f'damazzle_{slug}'
     data['slug']       = slug
-
-    # Build car_url from slug parts if possible
-    # URL pattern: /motors/cars/{make}/{date}/{full-slug}
-    if slug:
-        data['car_url'] = f'{SITE_URL}/motors/cars/{slug}'
-    else:
-        data['car_url'] = ''
+    data['car_url']    = f'{SITE_URL}/motors/cars/{slug}' if slug else ''
 
     title = _clean(c.get('title') or c.get('name', ''))
     data['ad_title']     = title
@@ -315,107 +335,24 @@ def _parse_car(c: Dict, detail: Optional[Dict] = None) -> Dict:
                             if any(k in title for k in ('إيجار', 'ايجار', 'للإيجار'))
                             else 'للبيع')
 
-    # Make from category or direct field
     cat = c.get('category', {}) or {}
     data['make'] = _clean(
         cat.get('name_ar') or cat.get('name') or c.get('make') or c.get('brand') or ''
     )
-
-    # City from governorate or direct
     gov = c.get('governorate', {}) or {}
     data['city'] = _clean(
         gov.get('name_ar') or gov.get('name') or c.get('city') or ''
     )
-
     data['price']      = _parse_price(c.get('price'))
     data['date_added'] = _parse_date(
-        c.get('createdAt') or c.get('created_at') or c.get('date_added')
+        c.get('createdAt') or c.get('created_at') or c.get('published_date') or
+        c.get('date_added')
     )
 
-    # Featured attributes
-    for attr in (c.get('featuredAttributes', []) or c.get('featured_attributes', []) or []):
-        key   = str(attr.get('slug', '') or attr.get('key', '') or '').strip().lower()
-        label = _clean(attr.get('name_ar') or attr.get('label_ar') or attr.get('name') or '')
-        val   = _clean(
-            attr.get('value_ar') or attr.get('value') or attr.get('val') or
-            attr.get('display_value') or ''
-        )
-        field = SLUG_MAP.get(key) or LABEL_MAP.get(label)
-        if field and not data.get(field):
-            data[field] = val
-
-    # All attributes at top level
-    for attr in (c.get('attributes', []) or []):
-        key   = str(attr.get('slug', '') or attr.get('key', '') or '').strip().lower()
-        label = _clean(attr.get('name_ar') or attr.get('label_ar') or attr.get('name') or '')
-        val   = _clean(
-            attr.get('value_ar') or attr.get('value') or attr.get('val') or
-            attr.get('display_value') or ''
-        )
-        field = SLUG_MAP.get(key) or LABEL_MAP.get(label)
-        if field and not data.get(field):
-            data[field] = val
-
-    # Direct flat fields
-    for src_key, field in (
-        ('year', 'year'), ('model', 'model'), ('mileage', 'mileage'),
-        ('color', 'exterior_color'), ('exterior_color', 'exterior_color'),
-        ('interior_color', 'interior_color'), ('fuel_type', 'fuel_type'),
-        ('transmission', 'transmission'), ('condition', 'condition'),
-        ('engine_size', 'engine_size'), ('body_type', 'body_type'),
-        ('drive_system', 'drive_system'), ('doors', 'doors'),
-        ('cylinders', 'cylinders'), ('chassis_number', 'chassis_number'),
-    ):
-        if not data.get(field) and c.get(src_key):
-            data[field] = _clean(str(c[src_key]))
-
-    # Normalise
-    for field, mapping in (
-        ('condition',    COND_MAP),
-        ('transmission', TRANS_MAP),
-        ('fuel_type',    FUEL_MAP),
-        ('body_type',    BODY_MAP),
-        ('drive_system', DRIVE_MAP),
-    ):
-        if data.get(field):
-            data[field] = _arabic(data[field], mapping)
-
-    # Images (collected, not downloaded)
-    images: List[str] = []
-    for img in (c.get('images') or c.get('photos') or c.get('media') or []):
-        src = (img.get('url') or img.get('src') or img.get('path') or img.get('image') or ''
-               if isinstance(img, dict) else str(img)).strip()
-        if src and src.startswith('http'):
-            images.append(src)
-
-    # Enrich from detail response
-    if detail:
-        dd = detail.get('data') or detail if isinstance(detail, dict) else {}
-
-        if not data.get('model'):
-            data['model'] = _clean(dd.get('model_ar') or dd.get('model') or '')
-        if not data.get('description'):
-            data['description'] = _clean(
-                dd.get('description_ar') or dd.get('description') or ''
-            )
-
-        seller = dd.get('user', {}) or dd.get('seller', {}) or {}
-        if not data.get('seller_name'):
-            data['seller_name'] = _clean(
-                seller.get('name') or seller.get('full_name') or ''
-            )
-        phones = dd.get('phones', []) or dd.get('contact_phones', []) or []
-        if not data.get('phone') and phones:
-            p = phones[0]
-            data['phone'] = _clean(
-                p.get('number') or p.get('phone') or ''
-                if isinstance(p, dict) else str(p)
-            )
-        seller_ads = seller.get('totalAds') or seller.get('ads_count') or seller.get('total_ads')
-        if seller_ads is not None:
-            data['seller_listings'] = str(seller_ads)
-
-        for attr in (dd.get('attributes', []) or dd.get('featuredAttributes', []) or []):
+    def _apply_attrs(attrs):
+        for attr in (attrs or []):
+            if not isinstance(attr, dict):
+                continue
             key   = str(attr.get('slug', '') or attr.get('key', '') or '').strip().lower()
             label = _clean(attr.get('name_ar') or attr.get('label_ar') or attr.get('name') or '')
             val   = _clean(
@@ -426,15 +363,86 @@ def _parse_car(c: Dict, detail: Optional[Dict] = None) -> Dict:
             if field and not data.get(field):
                 data[field] = val
 
-        # Detail images
-        detail_imgs = dd.get('images') or dd.get('photos') or dd.get('media') or []
-        if detail_imgs:
-            images = []
-            for img in detail_imgs:
-                src = (img.get('url') or img.get('src') or img.get('path') or ''
-                       if isinstance(img, dict) else str(img)).strip()
-                if src and src.startswith('http'):
-                    images.append(src)
+    _apply_attrs(c.get('featuredAttributes') or c.get('featured_attributes') or [])
+    _apply_attrs(c.get('attributes') or [])
+
+    # Direct flat fields as fallback
+    for src, dst in (
+        ('year', 'year'), ('model', 'model'), ('mileage', 'mileage'),
+        ('color', 'exterior_color'), ('exterior_color', 'exterior_color'),
+        ('interior_color', 'interior_color'), ('fuel_type', 'fuel_type'),
+        ('transmission', 'transmission'), ('condition', 'condition'),
+        ('engine_size', 'engine_size'), ('body_type', 'body_type'),
+        ('drive_system', 'drive_system'), ('doors', 'doors'),
+        ('cylinders', 'cylinders'), ('chassis_number', 'chassis_number'),
+    ):
+        if not data.get(dst) and c.get(src):
+            data[dst] = _clean(str(c[src]))
+
+    for field, mapping in (
+        ('condition',    COND_MAP),
+        ('transmission', TRANS_MAP),
+        ('fuel_type',    FUEL_MAP),
+        ('body_type',    BODY_MAP),
+        ('drive_system', DRIVE_MAP),
+    ):
+        if data.get(field):
+            data[field] = _arabic(data[field], mapping)
+
+    images: List[str] = []
+    for img in (c.get('images') or c.get('photos') or c.get('media') or []):
+        src = (img.get('url') or img.get('src') or img.get('path') or ''
+               if isinstance(img, dict) else str(img)).strip()
+        if src and src.startswith('http'):
+            images.append(src)
+
+    # Enrich from detail — detail must be a dict, data key must also be a dict
+    if isinstance(detail, dict):
+        data_val = detail.get('data')
+        if isinstance(data_val, dict):
+            dd = data_val
+        elif data_val is None:
+            # detail IS the car object directly
+            dd = detail if (detail.get('id') or detail.get('slug') or detail.get('title')) else {}
+        else:
+            dd = {}   # data is a list or something unexpected — skip
+
+        if dd:
+            if not data.get('model'):
+                data['model'] = _clean(dd.get('model_ar') or dd.get('model') or '')
+            if not data.get('description'):
+                data['description'] = _clean(
+                    dd.get('description_ar') or dd.get('description') or ''
+                )
+
+            seller = dd.get('user', {}) or dd.get('seller', {}) or {}
+            if not data.get('seller_name'):
+                data['seller_name'] = _clean(
+                    seller.get('name') or seller.get('full_name') or ''
+                )
+            phones = dd.get('phones', []) or dd.get('contact_phones', []) or []
+            if not data.get('phone') and phones:
+                p = phones[0]
+                data['phone'] = _clean(
+                    p.get('number') or p.get('phone') or ''
+                    if isinstance(p, dict) else str(p)
+                )
+            seller_ads = seller.get('totalAds') or seller.get('ads_count')
+            if seller_ads is not None:
+                data['seller_listings'] = str(seller_ads)
+
+            _apply_attrs(dd.get('attributes') or dd.get('featuredAttributes') or [])
+
+            detail_imgs = dd.get('images') or dd.get('photos') or dd.get('media') or []
+            if detail_imgs:
+                imgs2 = []
+                for img in detail_imgs:
+                    src = (img.get('url') or img.get('src') or img.get('path') or ''
+                           if isinstance(img, dict) else str(img)).strip()
+                    if src and src.startswith('http'):
+                        imgs2.append(src)
+                if imgs2:
+                    images = imgs2
 
     data['image_urls']  = images
     data['image_count'] = len(images)
@@ -470,6 +478,19 @@ class DamazzleRawScraper:
         self.existing_ids: Set[str] = self._load_existing_ids()
         self.progress: Dict         = _load_progress()
 
+        # HTTP session for direct API calls (once URL is discovered)
+        self.http = req_lib.Session()
+        self.http.headers.update({
+            'User-Agent': (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) '
+                'Chrome/120.0.0.0 Safari/537.36'
+            ),
+            'Accept': 'application/json',
+            'Origin': SITE_URL,
+            'Referer': SEARCH_URL,
+        })
+
         logger.info(f'Sheet IDs loaded  : {len(self.existing_ids)}')
         logger.info(
             f'Progress          : last_page={self.progress["last_page"]}, '
@@ -489,7 +510,7 @@ class DamazzleRawScraper:
         vals = self.sheet.col_values(col_idx)
         return set(vals[1:])
 
-    def _append_row(self, data: Dict):
+    def _sheet_append(self, data: Dict):
         row = [_to_cell(data.get(col)) for col in COLUMNS]
         self.sheet.append_row(row, value_input_option='RAW')
 
@@ -501,40 +522,37 @@ class DamazzleRawScraper:
             return True
         return False
 
-    async def _fetch_page_via_browser(
+    # ── Playwright helpers ────────────────────────────────────────────────────
+
+    async def _playwright_listing_page(
         self, page: Page, page_num: int
     ) -> tuple[List[Dict], Optional[int], Optional[str]]:
-        """
-        Navigate to the search page and intercept the JSON API response.
-        Returns (items, total_count, discovered_api_base).
-        """
-        url = f'{SEARCH_URL}?page={page_num}'
-        captured: List[Dict] = []
-        api_url_found: Optional[str] = None
-        total_found: Optional[int] = None
+        """Navigate to search page; intercept ONLY the listing API response."""
+        url      = f'{SEARCH_URL}?page={page_num}'
+        items    : List[Dict]    = []
+        total    : Optional[int] = None
+        api_url  : Optional[str] = None
 
-        async def handle_response(response: Response):
-            nonlocal api_url_found, total_found
-            if response.status != 200:
+        async def on_response(resp: Response):
+            nonlocal items, total, api_url
+            if resp.status != 200:
                 return
-            ct = response.headers.get('content-type', '')
-            if 'json' not in ct:
+            if 'json' not in resp.headers.get('content-type', ''):
                 return
             try:
-                body = await response.json()
+                body = await resp.json()
             except Exception:
                 return
-            if _looks_like_listing_array(body):
-                items = _extract_items(body)
-                if items:
-                    captured.extend(items)
-                    total_found = _extract_total(body) or total_found
-                    api_url_found = response.url
-                    logger.info(f'  Intercepted listing API: {response.url}')
-                    logger.info(f'  Got {len(items)} items')
+            if _is_listing_response(resp.url, body):
+                found = _extract_items(body)
+                if found:
+                    items   = found
+                    total   = _extract_total(body) or total
+                    api_url = resp.url
+                    logger.info(f'  Listing API: {resp.url}')
+                    logger.info(f'  {len(found)} items, total={total}')
 
-        page.on('response', handle_response)
-
+        page.on('response', on_response)
         try:
             await page.goto(url, wait_until='networkidle', timeout=PAGE_TIMEOUT)
         except Exception:
@@ -542,38 +560,44 @@ class DamazzleRawScraper:
                 await page.goto(url, wait_until='domcontentloaded', timeout=PAGE_TIMEOUT)
                 await asyncio.sleep(RESPONSE_WAIT)
             except Exception as exc:
-                logger.error(f'  Page load failed: {exc}')
+                logger.error(f'  Page load error: {exc}')
+        page.remove_listener('response', on_response)
+        return items, total, api_url
 
-        page.remove_listener('response', handle_response)
-        return captured, total_found, api_url_found
-
-    async def _fetch_detail_via_browser(
+    async def _playwright_detail_page(
         self, page: Page, car_url: str
     ) -> Optional[Dict]:
-        """Navigate to car detail page and intercept the detail API response."""
+        """Navigate to car detail page; return the single-car JSON response."""
         captured: Optional[Dict] = None
 
-        async def handle_response(response: Response):
+        async def on_response(resp: Response):
             nonlocal captured
-            if response.status != 200:
+            if resp.status != 200:
                 return
-            ct = response.headers.get('content-type', '')
-            if 'json' not in ct:
+            if 'json' not in resp.headers.get('content-type', ''):
+                return
+            # Skip search/category/list endpoints
+            url_lower = resp.url.lower()
+            if any(x in url_lower for x in ('search', 'categor', 'storage')):
                 return
             try:
-                body = await response.json()
+                body = await resp.json()
             except Exception:
                 return
-            # Detail response: a single car object (not an array)
-            dd = body.get('data') if isinstance(body, dict) else None
-            if not dd:
-                dd = body if isinstance(body, dict) and (
-                    body.get('id') or body.get('slug') or body.get('title')
-                ) else None
-            if dd:
+            # Accept only dict responses where data is a dict (single car)
+            if not isinstance(body, dict):
+                return
+            data_val = body.get('data')
+            if isinstance(data_val, dict) and (
+                data_val.get('id') or data_val.get('slug') or data_val.get('title')
+            ):
+                captured = body
+            elif data_val is None and (
+                body.get('id') or body.get('slug') or body.get('title')
+            ):
                 captured = body
 
-        page.on('response', handle_response)
+        page.on('response', on_response)
         try:
             await page.goto(car_url, wait_until='networkidle', timeout=PAGE_TIMEOUT)
         except Exception:
@@ -581,9 +605,29 @@ class DamazzleRawScraper:
                 await page.goto(car_url, wait_until='domcontentloaded', timeout=PAGE_TIMEOUT)
                 await asyncio.sleep(RESPONSE_WAIT)
             except Exception as exc:
-                logger.error(f'  Detail page load failed: {exc}')
-        page.remove_listener('response', handle_response)
+                logger.error(f'  Detail page error: {exc}')
+        page.remove_listener('response', on_response)
         return captured
+
+    # ── Direct HTTP helper (once URL is known) ────────────────────────────────
+
+    def _direct_listing_page(
+        self, listing_api_url: str, page_num: int
+    ) -> tuple[List[Dict], Optional[int]]:
+        url = _build_page_url(listing_api_url, page_num, PER_PAGE)
+        try:
+            resp = self.http.get(url, timeout=30)
+            resp.raise_for_status()
+            body = resp.json()
+            items = _extract_items(body)
+            total = _extract_total(body)
+            logger.info(f'  Direct API → {len(items)} items, total={total}')
+            return items, total
+        except Exception as exc:
+            logger.error(f'  Direct API error: {exc}')
+            return [], None
+
+    # ── Car processing ────────────────────────────────────────────────────────
 
     def _process_car(self, c: Dict, detail: Optional[Dict]) -> bool:
         lid    = str(c.get('id', '') or c.get('_id', '') or '').strip()
@@ -593,28 +637,33 @@ class DamazzleRawScraper:
         if car_id in self.existing_ids:
             return False
 
+        # Date filter check
+        date_added = _parse_date(
+            c.get('createdAt') or c.get('created_at') or c.get('published_date', '')
+        )
+        if date_added:
+            if self.start_date and date_added < self.start_date:
+                return False
+            if self.end_date and date_added > self.end_date:
+                return False
+
         try:
             data = _parse_car(c, detail)
         except Exception as exc:
-            logger.error(f'  Parse error: {exc}')
+            logger.error(f'  Parse error ({car_id}): {exc}')
             return False
 
-        # Date filter
-        if data.get('date_added'):
-            if self.start_date and data['date_added'] < self.start_date:
-                return False
-            if self.end_date and data['date_added'] > self.end_date:
-                return False
-
         try:
-            self._append_row(data)
+            self._sheet_append(data)
             _append_jsonl(data)
             self.existing_ids.add(car_id)
-            logger.info(f'  ✓  Saved: {data.get("ad_title", car_id)!r}')
+            logger.info(f'  ✓  {data.get("ad_title", car_id)!r}')
             return True
         except Exception as exc:
             logger.error(f'  Write failed: {exc}')
             return False
+
+    # ── Main loop ─────────────────────────────────────────────────────────────
 
     def run(self):
         asyncio.run(self._run_async())
@@ -623,10 +672,10 @@ class DamazzleRawScraper:
         progress = self.progress
 
         if self.full_mode:
-            start_page = progress['last_page'] + 1
             if progress.get('full_scrape_done'):
                 logger.info('Full scrape complete. Delete progress file to restart.')
                 return
+            start_page = progress['last_page'] + 1
             logger.info(f'Full scrape mode — resuming from page {start_page}')
         else:
             start_page = 1
@@ -635,6 +684,8 @@ class DamazzleRawScraper:
         logger.info('=' * 62)
         logger.info(f'Damazzle raw scraper  {datetime.now().isoformat()}')
         logger.info('=' * 62)
+
+        listing_api_url: Optional[str] = progress.get('listing_api_url')
 
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(headless=True)
@@ -646,38 +697,46 @@ class DamazzleRawScraper:
                 ),
                 locale='ar-SY',
             )
-            page = await ctx.new_page()
+            bpage = await ctx.new_page()
 
-            total_new        = 0
-            full_page_streak = 0
-            pg               = start_page
-            page_size        = 20
-            grand_total: Optional[int] = None
+            total_new     = 0
+            streak        = 0
+            pg            = start_page
+            grand_total   : Optional[int] = None
 
             while True:
                 if self._should_stop():
                     break
 
                 logger.info(f'\n[Page {pg}]')
-                items, total, _api = await self._fetch_page_via_browser(page, pg)
+
+                # Use browser for page 1 (to discover API URL), requests after
+                if listing_api_url and pg > 1:
+                    items, total = self._direct_listing_page(listing_api_url, pg)
+                else:
+                    items, total, found_url = await self._playwright_listing_page(bpage, pg)
+                    if found_url and not listing_api_url:
+                        listing_api_url = found_url
+                        progress['listing_api_url'] = found_url
+                        logger.info(f'  API URL saved: {found_url}')
+                        _save_progress(progress)
 
                 if total and not grand_total:
                     grand_total = total
-                    logger.info(f'  Total listings reported by API: {grand_total}')
 
                 if not items:
-                    logger.info('  No items received — stopping.')
+                    logger.info('  No items — stopping.')
                     if self.full_mode:
                         progress['full_scrape_done'] = True
                         _save_progress(progress)
                     break
 
-                # Date stop check (stop when all items are before start_date)
+                # Stop if all items are before start_date
                 if self.start_date:
                     dated = [
-                        _parse_date(it.get('createdAt') or it.get('created_at', ''))
+                        _parse_date(it.get('createdAt') or it.get('published_date', ''))
                         for it in items
-                        if _parse_date(it.get('createdAt') or it.get('created_at', ''))
+                        if _parse_date(it.get('createdAt') or it.get('published_date', ''))
                     ]
                     if dated and all(d < self.start_date for d in dated):
                         logger.info(f'  All before {self.start_date} — done.')
@@ -685,15 +744,15 @@ class DamazzleRawScraper:
 
                 new_items = [
                     it for it in items
-                    if (f"damazzle_{it.get('id', '')}" not in self.existing_ids
+                    if (f"damazzle_{it.get('id', '')}"   not in self.existing_ids
                         and f"damazzle_{it.get('slug', '')}" not in self.existing_ids)
                 ]
                 logger.info(f'  {len(items)} on page | {len(new_items)} new')
 
                 if not new_items:
                     if not self.full_mode:
-                        full_page_streak += 1
-                        if full_page_streak >= STOP_AFTER_FULL_PAGES:
+                        streak += 1
+                        if streak >= STOP_FULL_PAGES:
                             logger.info('  Caught up — stopping.')
                             break
                     else:
@@ -703,7 +762,7 @@ class DamazzleRawScraper:
                     pg += 1
                     continue
 
-                full_page_streak = 0
+                streak = 0
 
                 for it in new_items:
                     if self._should_stop():
@@ -713,14 +772,13 @@ class DamazzleRawScraper:
                         break
 
                     slug = str(it.get('slug', '') or '').strip()
-                    lid  = str(it.get('id', '') or '').strip()
+                    lid  = str(it.get('id',   '') or '').strip()
                     logger.info(f'  → {slug or lid}')
 
-                    # Fetch detail page for this car
                     detail = None
                     if slug:
                         car_url = f'{SITE_URL}/motors/cars/{slug}'
-                        detail  = await self._fetch_detail_via_browser(page, car_url)
+                        detail  = await self._playwright_detail_page(bpage, car_url)
                         await asyncio.sleep(REQUEST_DELAY)
 
                     ok = self._process_car(it, detail)
@@ -737,7 +795,7 @@ class DamazzleRawScraper:
                 if self._should_stop():
                     break
 
-                if grand_total and pg * page_size >= grand_total:
+                if grand_total and pg * PER_PAGE >= grand_total:
                     logger.info('  All pages scraped.')
                     if self.full_mode:
                         progress['full_scrape_done'] = True
@@ -757,7 +815,7 @@ class DamazzleRawScraper:
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Damazzle raw data scraper (Playwright)')
+    parser = argparse.ArgumentParser(description='Damazzle raw data scraper')
     parser.add_argument('--full',  action='store_true')
     parser.add_argument('--hours', type=float, metavar='N')
 

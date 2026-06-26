@@ -44,8 +44,26 @@ class Report(FPDF):
         self.cell(w, h, ar(txt), border=border, align=align,
                   new_x=new_x, new_y=new_y, fill=fill)
 
-    def ar_multi(self, w, txt, align="R"):
-        self.multi_cell(w, 7, ar(txt), align=align)
+    def ar_multi(self, w, txt, align="R", font="Amiri", size=13, lh=7):
+        """Word-wrap Arabic text applying BiDi per line — fixes reverse line-order bug."""
+        self.set_font(font, "", size)
+        avail = w if w > 0 else (self.w - self.l_margin - self.r_margin)
+        words = txt.split()
+        line_words: list = []
+
+        def flush():
+            if line_words:
+                self.cell(avail, lh, ar(" ".join(line_words)), align=align,
+                          new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+        for word in words:
+            trial = " ".join(line_words + [word])
+            if self.get_string_width(ar(trial)) <= avail - 2:
+                line_words.append(word)
+            else:
+                flush()
+                line_words[:] = [word]
+        flush()
 
     def section_title(self, title_ar, title_en=""):
         self.ln(4)
@@ -194,11 +212,12 @@ class Report(FPDF):
         self.set_font("Amiri", "", 13)
         self.set_text_color(*BLACK)
         intro = (
-            "في هذا المشروع قمنا بإنشاء برنامج بلغة Java يهدف إلى إدارة مطعم داخل فندق. "
+            "في هذا المشروع قمتُ بإنشاء برنامج بلغة Java يهدف إلى إدارة مطعم داخل فندق. "
             "يسمح البرنامج بإدخال بيانات موظف وطاولة، ثم إضافة وجبات ومشروبات إلى طلب الزبون، "
             "وعرض تفاصيل الطلب كاملةً مع الأسعار النهائية. "
             "الهدف من المشروع هو تطبيق المفاهيم الأساسية في البرمجة الكائنية مثل الوراثة، "
-            "الصف المجرد، التحميل الزائد للبواني، إعادة تعريف التوابع، والإدخال من المستخدم."
+            "الصف المجرد، التحميل الزائد للبواني، إعادة تعريف التوابع، تعدد الأشكال، "
+            "والإدخال من المستخدم."
         )
         self.ar_multi(0, intro)
         self.ln(4)
@@ -206,9 +225,9 @@ class Report(FPDF):
         self.section_title("فكرة عمل البرنامج", "Program Overview")
         overview = (
             "يعتمد البرنامج على مجموعة من الصفوف المترابطة. يقرأ الصف الرئيسي "
-            "بيانات الموظف والطاولة من المستخدم، ثم يطلب منه إدخال عدد من العناصر "
-            "(وجبات أو مشروبات). بعد الانتهاء يتم إنشاء كائن طلب يحتوي على جميع "
-            "البيانات وعرض تفاصيله مع السعر الإجمالي."
+            "بيانات الموظف والطاولة من المستخدم، ثم ينشئ كائن طلب ويطلب من المستخدم "
+            "إدخال عدد من العناصر (وجبات أو مشروبات) تُضاف إلى الطلب واحداً تلو الآخر. "
+            "بعد الانتهاء من الإدخال يتم عرض تفاصيل الطلب كاملةً مع السعر الإجمالي."
         )
         self.ar_multi(0, overview)
         self.ln(4)

@@ -161,9 +161,9 @@ def parse_cards(html: str) -> list:
             bm = card.select_one('button.bookmark[data-car-id]')
             car_id = bm['data-car-id'].strip() if bm else ''
 
-            # Make
+            # Make — site now shows bilingual "كيا Kia"; extract Arabic only
             make_el = card.select_one('h1.car-title')
-            make = make_el.get_text(strip=True) if make_el else ''
+            make = _arabic_only(make_el.get_text(strip=True)) if make_el else ''
 
             # Model / body / year from h2
             sub_el = card.select_one('h2.car-sub-title')
@@ -175,11 +175,21 @@ def parse_cards(html: str) -> list:
                 if len(parts) >= 3: year      = parts[2]
 
             # Features-a: mileage + city
+            # div.div-features-padding now contains an SVG icon, not a <p>;
+            # try <p> first, then fall back to any text node inside the div.
             feat_a = card.select_one('div.features-a')
             mileage = city = ''
             if feat_a:
                 km_el = feat_a.select_one('div.div-features-padding p')
-                mileage = _strip_km(km_el.get_text(strip=True)) if km_el else ''
+                if km_el:
+                    mileage = _strip_km(km_el.get_text(strip=True))
+                else:
+                    # Fallback: look for any element with km-like text
+                    for el in feat_a.select('span, p, div'):
+                        txt = el.get_text(strip=True)
+                        if re.search(r'\d', txt) and 'كم' in txt:
+                            mileage = _strip_km(txt)
+                            break
                 city_els = feat_a.select('div > span')
                 city = city_els[-1].get_text(strip=True) if city_els else ''
 
@@ -240,6 +250,20 @@ def _parse_price(text: str) -> str:
 def _strip_km(text: str) -> str:
     """Remove Arabic 'كم' suffix and extra whitespace from mileage."""
     return re.sub(r'\s*كم\s*$', '', text.strip()).strip()
+
+
+def _arabic_only(text: str) -> str:
+    """
+    Site now shows bilingual labels like 'كيا Kia' or 'تويوتا Toyota'.
+    Extract only the Arabic portion (leading Arabic script + spaces).
+    Falls back to the full text if no Arabic characters are found.
+    """
+    m = re.match(r'^([؀-ۿ\s،؛]+)', text.strip())
+    if m:
+        result = m.group(1).strip()
+        if result:
+            return result
+    return text.strip()
 
 
 def fetch_all_listings(session: requests.Session, max_pages: Optional[int] = None) -> list:
@@ -389,7 +413,7 @@ def scrape_detail(session: requests.Session, url: str) -> dict:
         if ld:
             try:
                 j = json.loads(ld.string)
-                data['make']         = j.get('brand', '')
+                data['make']         = _arabic_only(str(j.get('brand', '')))
                 data['model']        = j.get('model', '')
                 data['year']         = j.get('vehicleModelDate', '')
                 data['body_type']    = j.get('bodyType', '')
@@ -406,7 +430,7 @@ def scrape_detail(session: requests.Session, url: str) -> dict:
         right = _spec_pairs(soup, 'box-accordion-1-right')
         left  = _spec_pairs(soup, 'box-accordion-1-left')
 
-        data['make']             = right.get('نوع المركبة',    data.get('make', ''))
+        data['make']             = _arabic_only(right.get('نوع المركبة', data.get('make', '')))
         data['body_type']        = right.get('جسم المركبة',    data.get('body_type', ''))
         data['exterior_color']   = right.get('اللون الخارجي', data.get('exterior_color', ''))
         data['fuel_type']        = right.get('نوع الوقود',     data.get('fuel_type', ''))

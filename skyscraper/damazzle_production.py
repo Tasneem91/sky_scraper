@@ -11,8 +11,8 @@ MANDATORY FIELDS — car is skipped if ANY of these is missing or "غير معر
   make, model, year, fuel_type, city, price, phone, seller_name
 
 IMAGE — downloads the cover image (first in gallery) and removes the Damazzle
-watermark using corner-brightness detection + OpenCV inpainting.
-Requires: pip install opencv-python
+golden/amber "ZS" logo watermark using HSV color detection + LaMa inpainting.
+Requires: pip install opencv-python simple-lama-inpainting
 
 OUTPUT
   damazzle_production.jsonl   — one JSON record per valid car
@@ -39,13 +39,22 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
 
-# ── Optional: OpenCV for watermark removal ─────────────────────────────────────
+# ── Optional: OpenCV + LaMa for watermark removal ─────────────────────────────
 try:
     import cv2
     import numpy as np
     _OPENCV = True
 except ImportError:
     _OPENCV = False
+
+try:
+    from simple_lama_inpainting import SimpleLama
+    from PIL import Image as _PILImage
+    _LAMA = True
+except ImportError:
+    _LAMA = False
+
+_lama_model = None   # loaded lazily on first use
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -220,16 +229,92 @@ def _is_valid(data: Dict) -> Tuple[bool, str]:
 # ── Watermark removal ─────────────────────────────────────────────────────────
 
 
+def _detect_damazzle_mask(img_bgr: 'np.ndarray') -> 'np.ndarray':
+    """
+    Detect the Damazzle golden/amber "ZS" logo watermark using HSV color.
+
+    The logo sits near the image center and has a distinctive gold hue (H 8-38
+    in OpenCV's 0-179 scale). Blob filtering rejects car headlights, taillights,
+    and sky that happen to be orange/amber:
+      - area 0.05% – 8% of the image
+      - centroid within the center 60% of width and height
+
+    The closest-to-center blob is chosen as the watermark, plus any adjacent
+    blob within 15% of the larger image dimension (the logo has two parts).
+    Mask is dilated to cover semi-transparent edges.
+    """
+    h, w = img_bgr.shape[:2]
+    cx, cy = w // 2, h // 2
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+
+    lower = np.array([8,  100, 100], dtype=np.uint8)
+    upper = np.array([38, 255, 255], dtype=np.uint8)
+    color_mask = cv2.inRange(hsv, lower, upper)
+
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, kernel_close)
+
+    nb, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        color_mask, connectivity=8
+    )
+
+    min_area = int(h * w * 0.0005)   # 0.05% — reject noise
+    max_area = int(h * w * 0.08)     # 8%    — reject large backgrounds
+    x_margin = int(w * 0.20)
+    y_margin = int(h * 0.20)
+
+    best_lbl  = None
+    best_dist = float('inf')
+    for lbl in range(1, nb):
+        area = stats[lbl, cv2.CC_STAT_AREA]
+        bx, by = centroids[lbl]
+        if area < min_area or area > max_area:
+            continue
+        if not (x_margin < bx < w - x_margin and y_margin < by < h - y_margin):
+            continue
+        dist = ((bx - cx) ** 2 + (by - cy) ** 2) ** 0.5
+        if dist < best_dist:
+            best_dist = dist
+            best_lbl  = lbl
+
+    if best_lbl is None:
+        return np.zeros((h, w), dtype=np.uint8)
+
+    best_cx, best_cy = centroids[best_lbl]
+    proximity = max(w, h) * 0.15
+
+    final_mask = np.zeros((h, w), dtype=np.uint8)
+    for lbl in range(1, nb):
+        area = stats[lbl, cv2.CC_STAT_AREA]
+        if area < min_area or area > max_area:
+            continue
+        bx, by = centroids[lbl]
+        if ((bx - best_cx) ** 2 + (by - best_cy) ** 2) ** 0.5 <= proximity:
+            final_mask[labels == lbl] = 255
+
+    kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (17, 17))
+    final_mask = cv2.dilate(final_mask, kernel_dilate, iterations=3)
+    return final_mask
+
+
+def _inpaint_lama(img_bgr: 'np.ndarray', mask: 'np.ndarray') -> 'np.ndarray':
+    global _lama_model
+    if _lama_model is None:
+        logger.info('  Loading LaMa model (first run may download ~500 MB) …')
+        _lama_model = SimpleLama()
+        logger.info('  LaMa ready.')
+    img_rgb  = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    pil_img  = _PILImage.fromarray(img_rgb)
+    pil_mask = _PILImage.fromarray(mask)
+    result   = _lama_model(pil_img, pil_mask)
+    return cv2.cvtColor(np.array(result), cv2.COLOR_RGB2BGR)
+
+
 def _remove_watermark(img_bytes: bytes) -> bytes:
     """
-    Detect the Damazzle watermark logo in image corners and remove it via inpainting.
-
-    Strategy: scan all four corners (25% w × 20% h each). In each corner count
-    bright pixels (luminance > 195). The corner with the highest *and* most
-    concentrated bright-pixel ratio (but not so high it's just a white car body)
-    is the watermark. Dilate the mask and inpaint with INPAINT_TELEA.
-
-    Falls back to original bytes if OpenCV is unavailable or no watermark detected.
+    Detect and remove the Damazzle golden watermark logo.
+    Uses LaMa inpainting (high quality) with OpenCV TELEA as fallback.
+    Returns original bytes if OpenCV is unavailable or no watermark found.
     """
     if not _OPENCV:
         return img_bytes
@@ -239,51 +324,25 @@ def _remove_watermark(img_bytes: bytes) -> bytes:
         if img is None:
             return img_bytes
 
-        h, w = img.shape[:2]
-        cw = max(10, w // 4)
-        ch = max(10, h // 5)
+        mask = _detect_damazzle_mask(img)
+        coverage = float(mask.mean()) / 255 * 100
 
-        corners = [
-            (0,      0,      ch,     cw,    'top-left'),
-            (0,      w - cw, ch,     w,     'top-right'),
-            (h - ch, 0,      h,      cw,    'bottom-left'),
-            (h - ch, w - cw, h,      w,     'bottom-right'),
-        ]
-
-        best_thresh = None
-        best_box    = None
-        best_score  = 0.03   # minimum density threshold
-
-        for (y1, x1, y2, x2, name) in corners:
-            region = img[y1:y2, x1:x2]
-            gray   = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
-            _, thresh = cv2.threshold(gray, 195, 255, cv2.THRESH_BINARY)
-
-            ratio = float(np.sum(thresh > 0)) / thresh.size
-            std   = float(np.std(gray))
-
-            # Watermark: has some pattern variation AND bright-pixel ratio is
-            # neither too low (not there) nor too high (entire white background).
-            if 0.03 < ratio < 0.45 and std > 6 and ratio > best_score:
-                best_score  = ratio
-                best_thresh = thresh
-                best_box    = (y1, x1, y2, x2)
-                logger.debug(f'  Watermark candidate: {name} ratio={ratio:.2f} std={std:.1f}')
-
-        if best_box is None:
-            logger.debug('  No watermark region detected — saving original.')
+        if coverage < 0.1:
+            logger.debug('  No watermark detected — saving original.')
             return img_bytes
 
-        y1, x1, y2, x2 = best_box
-        kernel      = np.ones((9, 9), np.uint8)
-        mask_corner = cv2.dilate(best_thresh, kernel, iterations=2)
+        logger.debug(f'  Watermark mask {coverage:.1f}% — inpainting …')
 
-        full_mask = np.zeros((h, w), dtype=np.uint8)
-        full_mask[y1:y2, x1:x2] = mask_corner
+        if _LAMA:
+            try:
+                result = _inpaint_lama(img, mask)
+            except Exception as exc:
+                logger.debug(f'  LaMa failed ({exc}), falling back to OpenCV TELEA.')
+                result = cv2.inpaint(img, mask, inpaintRadius=7, flags=cv2.INPAINT_TELEA)
+        else:
+            result = cv2.inpaint(img, mask, inpaintRadius=7, flags=cv2.INPAINT_TELEA)
 
-        result = cv2.inpaint(img, full_mask, inpaintRadius=5, flags=cv2.INPAINT_TELEA)
         _, buf = cv2.imencode('.jpg', result, [cv2.IMWRITE_JPEG_QUALITY, 92])
-        logger.debug('  Watermark removed via inpainting.')
         return bytes(buf)
 
     except Exception as exc:
@@ -541,11 +600,11 @@ class DamazzleProductionScraper:
         self.progress     = _load_progress()
         self.existing_ids = _load_existing_ids()
 
-        if not _OPENCV and not skip_images:
-            logger.warning(
-                'opencv-python not installed — watermark removal disabled.\n'
-                '  Run: pip install opencv-python'
-            )
+        if not skip_images:
+            if not _OPENCV:
+                logger.warning('opencv-python not installed — watermark removal disabled. pip install opencv-python')
+            elif not _LAMA:
+                logger.warning('simple-lama-inpainting not installed — falling back to OpenCV TELEA. pip install simple-lama-inpainting')
 
         logger.info(f'Existing IDs loaded : {len(self.existing_ids)}')
         logger.info(f'Images dir          : {IMAGES_DIR}')

@@ -1,9 +1,21 @@
+/*
+ * وزارة السياحة — مركز الوادي للتأهيل والتدريب السياحي
+ * دبلومة تقانة المعلومات
+ *
+ * مشروع مادة بنى المعطيات
+ * نظام الاستعلام الفوري في قاعدة بيانات "صيدلية الوادي"
+ *
+ * اسم الطالبة: مروة الصحني
+ * أستاذ المادة: م. زكريا صافي
+ */
+
 #include <iostream>
 #include <string>
 using namespace std;
 
-const int TABLE_SIZE = 1000;
+const int TABLE_SIZE = 1000; // حجم جدول التقطيع
 
+// عقدة في سلسلة التصادم — تخزن بيانات دواء واحد
 struct Node {
     int barcode;
     string name;
@@ -12,15 +24,18 @@ struct Node {
     Node(int b, string n, double p) : barcode(b), name(n), price(p), next(nullptr) {}
 };
 
-Node* table[TABLE_SIZE];
+Node* table[TABLE_SIZE]; // مصفوفة رؤوس السلاسل
 
+// دالة التقطيع — Division Method: barcode % 1000
 int hashFunction(int barcode) {
     return barcode % TABLE_SIZE;
 }
 
+// إضافة دواء جديد إلى النظام
 void insert(int barcode, string name, double price) {
-    int index = hashFunction(barcode);
+    int index = hashFunction(barcode); // حساب موقع التخزين
     Node* cur = table[index];
+    // التحقق من عدم تكرار الباركود
     while (cur != nullptr) {
         if (cur->barcode == barcode) {
             cout << "  [!] الباركود " << barcode << " مسجل مسبقاً." << endl;
@@ -28,14 +43,16 @@ void insert(int barcode, string name, double price) {
         }
         cur = cur->next;
     }
+    // إدراج العقدة في رأس السلسلة
     Node* newNode = new Node(barcode, name, price);
     newNode->next = table[index];
     table[index] = newNode;
     cout << "  [+] تمت الإضافة: " << name << " | موقع: " << index << endl;
 }
 
+// البحث عن دواء بالباركود — O(1)
 void retrieve(int barcode) {
-    int index = hashFunction(barcode);
+    int index = hashFunction(barcode); // الانتقال المباشر للموقع
     Node* cur = table[index];
     while (cur != nullptr) {
         if (cur->barcode == barcode) {
@@ -48,6 +65,7 @@ void retrieve(int barcode) {
     cout << "  [✗] لا يوجد دواء بالباركود " << barcode << endl;
 }
 
+// عرض معالجة التصادم — 1573 و 2573 كلاهما يعطيان الموقع 573
 void demonstrateCollision() {
     int b1 = 1573, b2 = 2573;
     cout << "  باركود " << b1 << " => موقع التخزين: " << hashFunction(b1) << endl;
@@ -58,13 +76,14 @@ void demonstrateCollision() {
     cout << "  => كلا الدواءين محفوظان بدون ضياع أي سجل." << endl;
 }
 
+// تحديث سعر دواء — ينتقل مباشرة للموقع دون المرور على بقية العناصر
 void update(int barcode, double newPrice) {
     int index = hashFunction(barcode);
     Node* cur = table[index];
     while (cur != nullptr) {
         if (cur->barcode == barcode) {
             double oldPrice = cur->price;
-            cur->price = newPrice;
+            cur->price = newPrice; // تعديل السعر مباشرة
             cout << "  [✓] تم تحديث: " << cur->name << endl;
             cout << "      السعر القديم: " << oldPrice << " ل.س" << endl;
             cout << "      السعر الجديد: " << newPrice << " ل.س" << endl;
@@ -76,6 +95,7 @@ void update(int barcode, double newPrice) {
 }
 
 int main() {
+    // تهيئة جميع خلايا الجدول بـ nullptr
     for (int i = 0; i < TABLE_SIZE; i++) table[i] = nullptr;
 
     cout << "============================================" << endl;

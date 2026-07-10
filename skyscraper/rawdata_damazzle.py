@@ -25,6 +25,8 @@ USAGE
 
 import argparse
 import asyncio
+import base64
+import io
 import json
 import logging
 import os
@@ -43,6 +45,8 @@ import gspread
 from google.auth.transport.requests import Request
 from google.oauth2 import credentials as google_creds_module
 from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build as google_build
+from googleapiclient.http import MediaIoBaseUpload
 from playwright.async_api import async_playwright, Page, Response
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -70,7 +74,7 @@ OAUTH_TOKEN_FILE = os.path.join(SCRIPT_DIR, 'oauth_token.json')
 OUTPUT_FILE   = os.path.join(SCRIPT_DIR, 'rawdata_damazzle.jsonl')
 PROGRESS_FILE = os.path.join(SCRIPT_DIR, 'rawdata_damazzle_progress.json')
 
-SHEET_ID = '18welFOozXYwuB-Xr5Ppwsj4EB8L19NwJ3xKu3JkbDmY'
+SHEET_ID = '1X31PStrK7lqjdfj2Hy9hypFO4IO7wo_vh49nONSqL-Y'
 
 SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets',
@@ -90,21 +94,23 @@ STOP_FULL_PAGES   = 3         # incremental mode: stop after N all-seen pages
 # Substring that identifies the listing API (not categories, not static)
 LISTING_API_MARKER = 'search/ads'
 
+DEWATERMARK_URL    = 'https://platform.dewatermark.ai/api/object_removal/v2/erase_watermark'
+DRIVE_FOLDER_ID    = '1JrEXZVNlfL54Z22lRWtEDHkT4mnVNCIf'
+MIN_YEAR           = 2015
+
 # ── Sheet columns ─────────────────────────────────────────────────────────────
 
 COLUMNS: List[str] = [
     'id', 'source', 'car_url', 'listing_id', 'slug',
     'ad_title', 'listing_type',
-    'make', 'model', 'year', 'body_type', 'condition',
-    'exterior_color', 'interior_color',
-    'fuel_type', 'engine_size', 'transmission', 'drive_system',
-    'cylinders', 'doors', 'chassis_number', 'chassis_condition',
-    'warranty', 'horsepower', 'seats', 'steering_side', 'origin',
+    'make', 'model', 'year', 'condition',
+    'exterior_color',
+    'fuel_type', 'engine_size', 'transmission',
     'city', 'mileage', 'price',
     'date_added', 'scraped_at',
-    'phone', 'seller_name', 'seller_listings',
+    'phone', 'seller_name',
     'description',
-    'image_urls', 'image_count',
+    'cover_image_url', 'image_clean_link',
 ]
 
 # ── Field maps ────────────────────────────────────────────────────────────────
@@ -162,7 +168,9 @@ LABEL_MAP: Dict[str, str] = {
     'الغيار':             'transmission',
     'الحالة':             'condition',
     'الشروط':             'condition',   # shown on page
-    'المحرك':             'engine_size',
+    'المحرك':                   'engine_size',
+    'سعة المحرك':              'engine_size',
+    'سعة المحرك(سي سي)':      'engine_size',
     'نوع الجسم':          'body_type',
     'نظام الدفع':         'drive_system',
     'نوع الدفع':          'drive_system',
@@ -190,6 +198,35 @@ BODY_MAP  = {'sedan': 'سيدان', 'suv': 'دفع رباعي', 'pickup': 'بي�
              'truck': 'شاحنة', 'bus': 'باص'}
 DRIVE_MAP = {'fwd': 'دفع أمامي', 'rwd': 'دفع خلفي', '4wd': 'دفع رباعي',
              'awd': 'دفع رباعي كامل', '4x4': 'دفع رباعي'}
+
+# ── Title parsing: make/model extraction ──────────────────────────────────────
+
+# Multi-word Arabic makes — longer entries first so they match before their prefix
+_MULTI_WORD_MAKES = [
+    'بي ام دبليو',    # BMW
+    'جي ام سي',       # GMC
+    'رانج روفر',      # Range Rover
+    'لاند روفر',      # Land Rover
+    'رولز رويس',      # Rolls Royce
+    'أستون مارتن',    # Aston Martin
+    'ألفا روميو',     # Alfa Romeo
+    'مان تراك',       # MAN
+]
+
+# Title prefixes stripped before parsing
+_TITLE_PREFIXES = [
+    'للبيع سيارة', 'للإيجار سيارة', 'سيارة للبيع',
+    'سيارة للإيجار', 'للبيع', 'للإيجار', 'سيارة',
+]
+
+# Trailing words that describe condition/status, not model
+_TITLE_TRAIL = {'زيرو', 'جديد', 'جديدة', 'مستعمل', 'مستعملة', 'مشابه'}
+
+# Makes that the API returns as "unknown" — trigger title fallback
+_BAD_MAKES = {'أخرى', 'أخري', 'اخرى', 'اخري', 'غير محدد', 'غير_محدد', 'other', 'Other', '-'}
+
+# Same set used to replace "أخرى" with "غير ذلك" in non-make fields
+_AKHRY = {'أخرى', 'أخري', 'اخرى', 'اخري'}
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -221,6 +258,55 @@ def _parse_date(v: Any) -> str:
         return ''
     m = re.match(r'(\d{4}-\d{2}-\d{2})', str(v))
     return m.group(1) if m else ''
+
+
+def _strip_km(text: str) -> str:
+    """Remove Arabic 'كم' suffix and any surrounding whitespace."""
+    return re.sub(r'\s*كم\s*$', '', str(text).strip()).strip()
+
+
+def _strip_cc(text: str) -> str:
+    """Remove Arabic 'سي سي' (cc) suffix from engine size strings."""
+    return re.sub(r'\s*سي\s+سي\s*$', '', str(text).strip()).strip()
+
+
+def _clean_year(text: str) -> str:
+    """Extract a 4-digit year (1900-2099). Returns '' if nothing valid found."""
+    m = re.search(r'\b(19\d{2}|20\d{2})\b', str(text))
+    return m.group(1) if m else ''
+
+
+def _clean_model_str(model: str) -> str:
+    """Strip trailing year and condition words from a raw model string."""
+    model = re.sub(r'\s+\d{4}\s*$', '', model).strip()
+    words = model.split()
+    while words and words[-1] in _TITLE_TRAIL:
+        words.pop()
+    return ' '.join(words)
+
+
+def _parse_title(title: str):
+    """Return (make, model) extracted from a Damazzle Arabic ad title."""
+    text = title.strip()
+    for prefix in _TITLE_PREFIXES:
+        if text.startswith(prefix):
+            text = text[len(prefix):].strip()
+            break
+    if ' في ' in text:
+        text = text[:text.index(' في ')].strip()
+    text = _clean_model_str(text)
+    if not text:
+        return '', ''
+    # Check known multi-word makes first (longest match)
+    for make in _MULTI_WORD_MAKES:
+        if text.startswith(make):
+            model = _clean_model_str(text[len(make):].strip())
+            return make, model
+    # Default: first whitespace-delimited token = make
+    parts = text.split(None, 1)
+    make  = parts[0]
+    model = _clean_model_str(parts[1]) if len(parts) > 1 else ''
+    return make, model
 
 
 def _to_cell(v) -> str:
@@ -431,9 +517,21 @@ def _parse_car(c: Dict) -> Dict:
             if seller_ads is not None:
                 data['seller_listings'] = str(seller_ads)
 
-    # Model
+    # Model — try structured fields first
     if not data.get('model'):
         data['model'] = _clean(c.get('model_ar') or c.get('model') or '')
+
+    # Make/model from title — used when API category is "أخرى" or blank
+    if not data.get('make') or data['make'] in _BAD_MAKES:
+        t_make, t_model = _parse_title(title)
+        if t_make:
+            data['make'] = t_make
+        if not data.get('model') and t_model:
+            data['model'] = t_model
+    elif not data.get('model'):
+        _, t_model = _parse_title(title)
+        if t_model:
+            data['model'] = t_model
 
     # Description
     if not data.get('description'):
@@ -464,18 +562,34 @@ def _parse_car(c: Dict) -> Dict:
         if data.get(field):
             data[field] = _arabic(data[field], mapping)
 
-    # Images: gallery > images > cover_image
-    images: List[str] = []
-    for img in (c.get('gallery') or c.get('images') or c.get('photos') or []):
-        src = (img.get('src') or img.get('url') or img.get('path') or ''
-               if isinstance(img, dict) else str(img)).strip()
-        if src and src.startswith('http'):
-            images.append(src)
-    if not images and c.get('cover_image'):
-        images = [c['cover_image']]
+    # Clean year: extract 4-digit number only (handles "قبل 2000", ranges, etc.)
+    if data.get('year'):
+        data['year'] = _clean_year(data['year'])
 
-    data['image_urls']  = images
-    data['image_count'] = len(images)
+    # Clean mileage: strip "كم" suffix
+    if data.get('mileage'):
+        data['mileage'] = _strip_km(data['mileage'])
+
+    # Clean engine_size: strip "سي سي" unit suffix
+    if data.get('engine_size'):
+        data['engine_size'] = _strip_cc(data['engine_size'])
+
+    # Clean model: strip leaked city info like "في دمشق" or "في ريف دمشق"
+    if data.get('model'):
+        m = data['model'].strip()
+        if ' في ' in m:
+            m = m[:m.index(' في ')].strip()
+        if re.match(r'^في\s', m):
+            m = ''
+        data['model'] = m
+
+    # Replace "أخرى" with "غير ذلك" in all non-make fields
+    for _f in ('condition', 'exterior_color', 'fuel_type', 'engine_size',
+               'transmission', 'body_type', 'drive_system', 'city',
+               'listing_type', 'model'):
+        if data.get(_f) in _AKHRY:
+            data[_f] = 'غير ذلك'
+
     return data
 
 
@@ -490,10 +604,12 @@ class DamazzleRawScraper:
         max_hours: Optional[float] = None,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
+        dewatermark_key: Optional[str] = None,
     ):
-        self.full_mode  = full_mode
-        self.start_date = start_date
-        self.end_date   = end_date
+        self.full_mode       = full_mode
+        self.start_date      = start_date
+        self.end_date        = end_date
+        self.dewatermark_key = dewatermark_key
         self.deadline: Optional[datetime] = (
             datetime.now() + timedelta(hours=max_hours) if max_hours else None
         )
@@ -503,6 +619,14 @@ class DamazzleRawScraper:
         creds      = _get_oauth_credentials()
         self.gc    = gspread.authorize(creds)
         self.sheet = self.gc.open_by_key(SHEET_ID).sheet1
+
+        # Google Drive service (for image uploads)
+        self.drive_svc = None
+        try:
+            self.drive_svc = google_build('drive', 'v3', credentials=creds)
+            logger.info('Google Drive service initialized.')
+        except Exception as exc:
+            logger.warning(f'Could not initialize Drive service: {exc}')
 
         self._ensure_headers()
         self.existing_ids: Set[str] = self._load_existing_ids()
@@ -881,6 +1005,51 @@ class DamazzleRawScraper:
 
         return dom
 
+    # ── Image helpers ─────────────────────────────────────────────────────────
+
+    def _make_public(self, file_id: str) -> None:
+        try:
+            self.drive_svc.permissions().create(
+                fileId=file_id,
+                body={'type': 'anyone', 'role': 'reader'},
+            ).execute()
+        except Exception as exc:
+            logger.warning(f'  Drive make-public failed: {exc}')
+
+    def _upload_bytes(self, data: bytes, mime: str, filename: str) -> str:
+        if not (self.drive_svc and DRIVE_FOLDER_ID):
+            return ''
+        try:
+            meta   = {'name': filename, 'parents': [DRIVE_FOLDER_ID]}
+            media  = MediaIoBaseUpload(io.BytesIO(data), mimetype=mime, resumable=False)
+            result = self.drive_svc.files().create(
+                body=meta, media_body=media, fields='id'
+            ).execute()
+            fid  = result.get('id', '')
+            self._make_public(fid)
+            return f'https://drive.google.com/uc?id={fid}' if fid else ''
+        except Exception as exc:
+            logger.warning(f'  Drive upload failed: {exc}')
+            return ''
+
+    def _remove_watermark(self, image_bytes: bytes) -> Optional[bytes]:
+        try:
+            resp = req_lib.post(
+                DEWATERMARK_URL,
+                headers={'X-API-KEY': self.dewatermark_key},
+                files={'original_preview_image': ('image.jpg', image_bytes, 'image/jpeg')},
+                timeout=60,
+            )
+            resp.raise_for_status()
+            b64 = resp.json().get('edited_image', {}).get('image', '')
+            if not b64:
+                logger.warning('  Dewatermark: empty image in response')
+                return None
+            return base64.b64decode(b64)
+        except Exception as exc:
+            logger.warning(f'  Dewatermark API error: {exc}')
+            return None
+
     # ── Car processing ────────────────────────────────────────────────────────
 
     def _process_car(self, c: Dict) -> bool:
@@ -900,6 +1069,18 @@ class DamazzleRawScraper:
             if self.end_date and date_added > self.end_date:
                 return False
 
+        # Extract cover image from listing response BEFORE fetching detail page
+        cover_url = ''
+        for img in (c.get('gallery') or c.get('images') or c.get('photos') or []):
+            src = (img.get('src') or img.get('url') or img.get('path') or ''
+                   if isinstance(img, dict) else str(img)).strip()
+            if src and src.startswith('http'):
+                cover_url = src
+                break
+        if not cover_url:
+            raw = c.get('cover_image') or c.get('thumbnail') or ''
+            cover_url = raw.strip() if isinstance(raw, str) else ''
+
         # Fetch ALL structured spec fields from the detail-by-slug endpoint.
         # The listing API only gives 2 featured_fields; the detail API gives everything.
         if slug:
@@ -913,11 +1094,52 @@ class DamazzleRawScraper:
             logger.error(f'  Parse error ({car_id}): {exc}')
             return False
 
+        # ── Year filter: skip cars older than MIN_YEAR ──
+        year_str = str(data.get('year', '') or '').strip()
+        if year_str:
+            try:
+                if int(year_str) < MIN_YEAR:
+                    logger.info(f'  Skip (year {year_str} < {MIN_YEAR}): {car_id}')
+                    return False
+            except ValueError:
+                pass
+
+        data['cover_image_url'] = cover_url
+
+        # ── Download cover image → dewatermark → upload clean to Drive ──
+        image_clean_link = ''
+        if cover_url and self.dewatermark_key:
+            try:
+                r = self.http.get(cover_url, timeout=30)
+                r.raise_for_status()
+                orig_bytes = r.content
+                logger.info('  Removing watermark …')
+                clean_bytes = self._remove_watermark(orig_bytes)
+                if clean_bytes:
+                    if self.drive_svc and DRIVE_FOLDER_ID:
+                        cl = self._upload_bytes(
+                            clean_bytes, 'image/jpeg', f'{car_id}_clean.jpg'
+                        )
+                        image_clean_link = cl or ''
+                        logger.info('  ✓ Clean image uploaded to Drive')
+                    else:
+                        logger.info('  ✓ Watermark removed (no Drive folder set — skipping upload)')
+                else:
+                    logger.warning('  Watermark removal returned no image')
+            except Exception as exc:
+                logger.warning(f'  Image error for {car_id}: {exc}')
+
+        data['image_clean_link'] = image_clean_link
+
         try:
             self._sheet_append(data)
             _append_jsonl(data)
             self.existing_ids.add(car_id)
-            logger.info(f'  ✓  {data.get("ad_title", car_id)!r}  phone={data.get("phone","-")}')
+            logger.info(
+                f'  ✓  {data.get("ad_title", car_id)!r}'
+                f'  phone={data.get("phone","-")}'
+                f'  year={data.get("year","-")}'
+            )
             return True
         except Exception as exc:
             logger.error(f'  Write failed: {exc}')
@@ -1082,8 +1304,10 @@ if __name__ == '__main__':
             return f'{m.group(3)}-{m.group(2)}-{m.group(1)}'
         raise argparse.ArgumentTypeError(f'Invalid date "{s}"')
 
-    parser.add_argument('--start-date', type=_pd, metavar='DATE')
-    parser.add_argument('--end-date',   type=_pd, metavar='DATE')
+    parser.add_argument('--start-date',      type=_pd, metavar='DATE', default='2026-06-01')
+    parser.add_argument('--end-date',        type=_pd, metavar='DATE', default='2026-07-31')
+    parser.add_argument('--dewatermark-key', metavar='KEY',
+                        help='dewatermark.ai API key for watermark removal')
     args = parser.parse_args()
 
     if sys.stdout.encoding != 'utf-8':
@@ -1094,6 +1318,7 @@ if __name__ == '__main__':
         max_hours=args.hours,
         start_date=args.start_date,
         end_date=args.end_date,
+        dewatermark_key=args.dewatermark_key,
     )
 
     def _sig(s, f):

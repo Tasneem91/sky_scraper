@@ -451,6 +451,14 @@ def _parse_detail(html: str) -> Dict:
             if value:
                 detail[col] = value
 
+    # ── Cover image from detail page swiper (thumb-md, larger than card thumb-sm) ──
+    _bad = ('icon', 'logo', 'placeholder', 'avatar', 'flag', 'sprite')
+    for img in soup.find_all('img'):
+        src = (img.get('src') or '').strip()
+        if src.startswith('http') and 'thumb-md' in src and not any(k in src.lower() for k in _bad):
+            detail['cover_image_url'] = src
+            break
+
     # ── Seller name ───────────────────────────────────────────────────────────
     name_span = soup.find('span', class_=lambda c: c and isinstance(c, list)
                            and 'text-primary' in c and 'font-semibold' in c)

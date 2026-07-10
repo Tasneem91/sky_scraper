@@ -156,7 +156,7 @@ class Report(FPDF):
         self.set_font("Amiri", "", 10)
         self.set_text_color(*WHITE)
         self.ar_cell(0, 8,
-            "العمليات: إدراج | بحث لحظي | معالجة التصادم | تحديث — لغة البرمجة: Java",
+            "العمليات: إدراج | بحث لحظي | معالجة التصادم | تحديث — لغة البرمجة: C++",
             align="C")
 
     # ---------------------------------------------------------------- TOC
@@ -323,14 +323,14 @@ class Report(FPDF):
     def code_section(self):
         self.add_page()
         self.section_title("الكود المصدري الكامل", "Full Source Code")
-        code_path = "/home/user/sky_scraper/pharmacy_system/MarwaAlSahni.java"
+        code_path = "/home/user/sky_scraper/pharmacy_system/MarwaAlSahni.cpp"
         with open(code_path, encoding="utf-8") as f:
             code = f.read()
 
         self.set_fill_color(*DBLUE)
         self.set_text_color(*WHITE)
         self.set_font("Mono", "B", 10)
-        self.cell(0, 7, "  MarwaAlSahni.java", border=0, align="L", fill=True,
+        self.cell(0, 7, "  MarwaAlSahni.cpp", border=0, align="L", fill=True,
                   new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
         self.set_font("Mono", "", 7.5)
@@ -359,38 +359,36 @@ class Report(FPDF):
 رقم الباركود (4 أرقام): 1573
 اسم الدواء: Vitamin C
 السعر (ل.س): 500
-  [+] تمت إضافة الدواء: Vitamin C | موقع التخزين: 573
+  [+] تمت الإضافة: Vitamin C | موقع: 573
 
 --- القائمة الرئيسية ---
 اختر رقم العملية: 1
 رقم الباركود (4 أرقام): 3001
 اسم الدواء: Panadol Extra
 السعر (ل.س): 350
-  [+] تمت إضافة الدواء: Panadol Extra | موقع التخزين: 1
+  [+] تمت الإضافة: Panadol Extra | موقع: 1
 
 --- القائمة الرئيسية ---
 اختر رقم العملية: 2
 رقم الباركود: 1573
-  [✓] تم العثور على الدواء:
-      الاسم  : Vitamin C
-      السعر  : 500.0 ل.س
+  [✓] الاسم  : Vitamin C
+      السعر  : 500 ل.س
 
 --- القائمة الرئيسية ---
 اختر رقم العملية: 3
   باركود 1573 => موقع التخزين: 573
   باركود 2573 => موقع التخزين: 573
-  => تصادم! يتم ربطهما في سلسلة بنفس الخلية.
-  [+] تمت إضافة الدواء: Paracetamol 500mg | موقع التخزين: 573
-  [+] تمت إضافة الدواء: Aspirin 100mg     | موقع التخزين: 573
+  => تصادم — يتم ربطهما في سلسلة بنفس الخلية.
+  [!] الباركود 1573 مسجل مسبقاً.
+  [+] تمت الإضافة: Aspirin 100mg | موقع: 573
   => كلا الدواءين محفوظان بدون ضياع أي سجل.
 
 --- القائمة الرئيسية ---
 اختر رقم العملية: 4
 رقم الباركود: 1573
 السعر الجديد (ل.س): 600
-  [✓] تم تحديث سعر: Vitamin C
-      السعر القديم: 500.0 ل.س
-      السعر الجديد: 600.0 ل.س
+  [✓] تم التحديث: Vitamin C
+      القديم: 500 | الجديد: 600 ل.س
 
 --- القائمة الرئيسية ---
 اختر رقم العملية: 5
@@ -403,16 +401,19 @@ class Report(FPDF):
                         new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
         self.ln(5)
-        self.section_title("ملاحظة للتشغيل على Windows", "Windows Run Note")
+        self.section_title("تعليمات التشغيل", "How to Run")
         self.set_text_color(*BLACK)
         self.ar_para(0,
-            'لتشغيل البرنامج بشكل صحيح على Windows مع عرض الأرقام بشكل سليم، '
-            'استخدم الأمر التالي في terminal برنامج VS Code:')
+            'لتجميع البرنامج وتشغيله، استخدم الأوامر التالية في terminal:')
         self.ln(2)
         self.set_fill_color(230, 240, 255)
         self.set_font("Mono", "B", 11)
         self.set_text_color(*DBLUE)
-        self.cell(0, 9, "  chcp 65001  &&  java -Duser.language=en -Duser.country=US MarwaAlSahni",
+        self.cell(0, 9, "  g++ -o MarwaAlSahni MarwaAlSahni.cpp -std=c++11",
+                  border=1, align="L", fill=True,
+                  new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        self.ln(2)
+        self.cell(0, 9, "  ./MarwaAlSahni          (Linux/Mac)  |  MarwaAlSahni.exe  (Windows)",
                   border=1, align="L", fill=True,
                   new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 

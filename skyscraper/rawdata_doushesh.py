@@ -75,7 +75,7 @@ OAUTH_TOKEN_FILE = os.path.join(SCRIPT_DIR, 'oauth_token.json')
 OUTPUT_FILE = os.path.join(SCRIPT_DIR, 'rawdata_doushesh.jsonl')
 
 # ── Set your target Google Sheet ID here ──────────────────────────────────────
-SHEET_ID = ''   # TODO: fill in the Google Sheet ID for doushesh data
+SHEET_ID = '1dlQIEsN87GXio0mh7nawVZyoM0v8cMLpDH5zMn7RfUw'
 
 SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets',
